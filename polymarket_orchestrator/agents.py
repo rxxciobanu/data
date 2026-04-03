@@ -6,6 +6,7 @@ import logging
 
 import anthropic
 
+from polymarket_orchestrator.aggregation import aggregate_opinions
 from polymarket_orchestrator.config import settings
 from polymarket_orchestrator.models import AgentOpinion, DebateResult, Market
 
@@ -179,7 +180,12 @@ async def run_debate(market: Market) -> DebateResult:
     )
     opinions = list(opinions)
 
-    # Synthesizer aggregates
+    # Step 1: Mathematical aggregation (the actual consensus number)
+    consensus, math_explanation = aggregate_opinions(
+        opinions, method=settings.aggregation_method
+    )
+
+    # Step 2: Synthesizer provides qualitative reasoning (optional LLM call)
     synthesis_prompt = _build_synthesis_prompt(market, opinions)
     try:
         synth_response = await client.messages.create(
@@ -189,17 +195,16 @@ async def run_debate(market: Market) -> DebateResult:
             messages=[{"role": "user", "content": synthesis_prompt}],
         )
         synth = _parse_agent_response(synth_response.content[0].text)
-        consensus = float(synth["probability"])
-        synthesis_reasoning = synth["reasoning"]
+        qualitative_reasoning = synth["reasoning"]
     except Exception as e:
         logger.error("Synthesizer failed: %s", e)
-        # Fallback: weighted average (Analyst gets 2x weight)
-        weights = {"Bull": 1, "Bear": 1, "Analyst": 2}
-        total_w = sum(weights.get(o.agent_name, 1) for o in opinions)
-        consensus = sum(
-            o.probability * weights.get(o.agent_name, 1) for o in opinions
-        ) / total_w
-        synthesis_reasoning = f"Synthesizer failed ({e}). Using weighted average."
+        qualitative_reasoning = "(Synthesizer unavailable)"
+
+    # Combine mathematical and qualitative explanations
+    synthesis_reasoning = (
+        f"{math_explanation}\n\n"
+        f"Qualitative synthesis: {qualitative_reasoning}"
+    )
 
     return DebateResult(
         market=market,

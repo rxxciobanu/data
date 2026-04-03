@@ -28,5 +28,8 @@ class Settings(BaseSettings):
     # Claude model for debate agents
     debate_model: str = "claude-sonnet-4-6"
 
+    # Aggregation method: "extremized", "log_odds", or "weighted_avg"
+    aggregation_method: str = os.getenv("AGGREGATION_METHOD", "extremized")
+
 
 settings = Settings()

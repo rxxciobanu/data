@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 
+from polymarket_orchestrator.aggregation import aggregate_opinions
 from polymarket_orchestrator.config import settings
 from polymarket_orchestrator.models import (
     AgentOpinion,
@@ -369,89 +370,103 @@ def run_orchestration() -> None:
     threshold = settings.alert_threshold
     alerts: list[BettingAlert] = []
 
-    print("=" * 65)
-    print("  POLYMARKET AI ORCHESTRATOR — FULL PIPELINE TEST")
+    print("=" * 70)
+    print("  POLYMARKET AI ORCHESTRATOR — MATHEMATICAL AGGREGATION TEST")
     print("  Real market data from Polymarket (2026-04-03)")
-    print("  Simulated 4-agent Claude debate per market")
-    print("=" * 65)
+    print(f"  Aggregation: {settings.aggregation_method}")
+    print("=" * 70)
 
     for market in MARKETS:
         debate = DEBATES[market.id]
-        result = DebateResult(
-            market=market,
-            opinions=debate["opinions"],
-            consensus_probability=debate["consensus"],
-            synthesis_reasoning=debate["synthesis"],
+        opinions = debate["opinions"]
+
+        # === MATHEMATICAL AGGREGATION (the new way) ===
+        consensus, math_explanation = aggregate_opinions(
+            opinions, method=settings.aggregation_method
         )
 
-        divergence = result.consensus_probability - market.yes_price
+        result = DebateResult(
+            market=market,
+            opinions=opinions,
+            consensus_probability=consensus,
+            synthesis_reasoning=math_explanation,
+        )
 
-        print(f"\n{'━' * 65}")
+        divergence = consensus - market.yes_price
+
+        print(f"\n{'━' * 70}")
         print(f"  MARKET: {market.question}")
-        print(f"  Polymarket: {market.yes_price:.0%}  |  Volume: ${market.volume:,.0f}")
-        print(f"{'━' * 65}")
+        print(f"  Polymarket: {market.yes_price:.1%}  |  Volume: ${market.volume:,.0f}")
+        print(f"{'━' * 70}")
 
-        for op in result.opinions:
+        for op in opinions:
+            w = {"low": 1, "medium": 2, "high": 3}.get(op.confidence, 2)
             bar_len = int(op.probability * 30)
             bar = "█" * bar_len + "░" * (30 - bar_len)
-            print(f"  {op.agent_name:<10} {bar} {op.probability:.0%}  ({op.confidence})")
-            # Wrap reasoning to 65 chars
-            words = op.reasoning.split()
-            line = "             "
-            for w in words:
-                if len(line) + len(w) + 1 > 63:
-                    print(line)
-                    line = "             " + w
-                else:
-                    line += " " + w if line.strip() else "             " + w
-            if line.strip():
-                print(line)
-            print()
+            print(f"  {op.agent_name:<10} {bar} {op.probability:.1%}  "
+                  f"(conf={op.confidence}, w={w})")
 
-        print(f"  {'─' * 55}")
-        bar_len = int(result.consensus_probability * 30)
-        bar = "█" * bar_len + "░" * (30 - bar_len)
-        print(f"  CONSENSUS  {bar} {result.consensus_probability:.0%}")
-        print(f"  POLYMARKET {'█' * int(market.yes_price * 30)}{'░' * (30 - int(market.yes_price * 30))} {market.yes_price:.0%}")
-        print(f"  DIVERGENCE {'':>30} {divergence:+.0%}")
+        # Show all three methods
+        from polymarket_orchestrator.aggregation import (
+            weighted_average, log_odds_pooling, extremized_aggregate,
+        )
+        p_wa = weighted_average(opinions)
+        p_lo = log_odds_pooling(opinions)
+        p_ex = extremized_aggregate(opinions)
+
+        print(f"\n  {'─' * 60}")
+        print(f"  AGGREGATION METHODS:")
+
+        def _bar(p: float, label: str, selected: bool = False) -> str:
+            b = "█" * int(p * 30) + "░" * (30 - int(p * 30))
+            marker = " ◄" if selected else ""
+            return f"  {label:<16} {b} {p:.1%}{marker}"
+
+        sel = settings.aggregation_method
+        print(_bar(p_wa, "Weighted Avg", sel == "weighted_avg"))
+        print(_bar(p_lo, "Log-Odds Pool", sel == "log_odds"))
+        print(_bar(p_ex, "Extremized", sel == "extremized"))
+        print(f"  {'─' * 60}")
+        poly_bar = "█" * int(market.yes_price * 30) + "░" * (30 - int(market.yes_price * 30))
+        cons_bar = "█" * int(consensus * 30) + "░" * (30 - int(consensus * 30))
+        print(f"  {'POLYMARKET':<16} {poly_bar} {market.yes_price:.1%}")
+        print(f"  {'AI CONSENSUS':<16} {cons_bar} {consensus:.1%}  ◄ selected")
+        print(f"  {'DIVERGENCE':<16} {'':>30} {divergence:+.1%}")
 
         if abs(divergence) >= threshold:
             side = "YES" if divergence > 0 else "NO"
             alert = BettingAlert(
                 market=market,
                 polymarket_probability=market.yes_price,
-                ai_probability=result.consensus_probability,
+                ai_probability=consensus,
                 divergence=divergence,
                 recommended_side=side,
-                reasoning=result.synthesis_reasoning,
+                reasoning=math_explanation,
             )
             alerts.append(alert)
-            print(f"\n  *** ALERT: Bet {side} — {abs(divergence):.0%} edge detected ***")
+            print(f"\n  *** ALERT: Bet {side} — {abs(divergence):.1%} edge ***")
         else:
-            print(f"\n  No opportunity (divergence below {threshold:.0%} threshold)")
+            print(f"\n  No opportunity (below {threshold:.0%} threshold)")
 
     # Final summary
-    print(f"\n\n{'=' * 65}")
-    print(f"  ALERTS SUMMARY: {len(alerts)} betting opportunity(ies) found")
-    print(f"{'=' * 65}")
+    print(f"\n\n{'=' * 70}")
+    print(f"  ALERTS SUMMARY: {len(alerts)} betting opportunity(ies)")
+    print(f"{'=' * 70}")
 
     if alerts:
         for a in alerts:
             indicator = "▲ YES" if a.recommended_side == "YES" else "▼ NO"
             print(f"\n  {indicator}  {a.market.question}")
-            print(f"       Polymarket says: {a.polymarket_probability:.0%}")
-            print(f"       AI consensus:    {a.ai_probability:.0%}")
-            print(f"       Edge:            {a.divergence_pct}")
-            print(f"       Reasoning: {a.reasoning[:120]}...")
+            print(f"       Polymarket: {a.polymarket_probability:.1%}")
+            print(f"       AI:         {a.ai_probability:.1%}")
+            print(f"       Edge:       {a.divergence_pct}")
 
-        # Generate email
         html = _build_email_html(alerts)
         with open("/home/user/data/alert_email_preview.html", "w") as f:
             f.write(html)
-        print(f"\n  Email preview saved → alert_email_preview.html ({len(html):,} chars)")
-        print("  (Open in browser to see the formatted alert email)")
+        print(f"\n  Email preview saved → alert_email_preview.html")
     else:
-        print("\n  No opportunities above threshold. Markets are efficiently priced.")
+        print("\n  No opportunities above threshold.")
 
 
 if __name__ == "__main__":
