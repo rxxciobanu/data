@@ -8,6 +8,7 @@ from polymarket_orchestrator.config import settings
 from polymarket_orchestrator.models import BettingAlert, DebateResult, Market
 from polymarket_orchestrator.notifier import send_alert_email
 from polymarket_orchestrator.polymarket import PolymarketClient
+from polymarket_orchestrator.sizing import compute_bet_size
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,10 @@ async def _debate_market(market: Market) -> DebateResult | None:
         return None
 
 
-def _check_divergence(result: DebateResult) -> BettingAlert | None:
+def _check_divergence(
+    result: DebateResult,
+    current_exposure: float = 0.0,
+) -> BettingAlert | None:
     """Check if the AI consensus diverges enough from Polymarket to alert."""
     market = result.market
     poly_prob = market.yes_price
@@ -38,11 +42,9 @@ def _check_divergence(result: DebateResult) -> BettingAlert | None:
     if abs(divergence) < settings.alert_threshold:
         return None
 
-    # If AI thinks probability is higher than market → bet YES
-    # If AI thinks probability is lower than market → bet NO
     recommended_side = "YES" if divergence > 0 else "NO"
 
-    return BettingAlert(
+    alert = BettingAlert(
         market=market,
         polymarket_probability=poly_prob,
         ai_probability=ai_prob,
@@ -50,6 +52,30 @@ def _check_divergence(result: DebateResult) -> BettingAlert | None:
         recommended_side=recommended_side,
         reasoning=result.synthesis_reasoning,
     )
+
+    # Position sizing (only when bankroll is configured)
+    if settings.bankroll > 0:
+        if not market.price_is_live:
+            logger.warning(
+                "Skipping sizing for '%s' — price data is stale (CLOB enrichment failed).",
+                market.question,
+            )
+        else:
+            alert.sizing = compute_bet_size(
+                ai_prob=ai_prob,
+                market_prob=poly_prob,
+                side=recommended_side,
+                opinions=result.opinions,
+                market=market,
+                bankroll=settings.bankroll,
+                kelly_fraction_setting=settings.kelly_fraction,
+                max_bet_pct=settings.max_bet_pct,
+                max_exposure=settings.bankroll * settings.max_total_exposure,
+                current_exposure=current_exposure,
+                min_bet_size=settings.min_bet_size,
+            )
+
+    return alert
 
 
 async def run_analysis(
@@ -75,6 +101,7 @@ async def run_analysis(
 
     # Debate markets in batches of `concurrency` for throughput + rate-limit safety
     alerts: list[BettingAlert] = []
+    current_exposure = 0.0  # Tracks cumulative bet amounts for portfolio cap
     total = len(markets)
     for batch_start in range(0, total, concurrency):
         batch = markets[batch_start : batch_start + concurrency]
@@ -92,14 +119,22 @@ async def run_analysis(
         for result in results:
             if result is None:
                 continue
-            alert = _check_divergence(result)
+            alert = _check_divergence(result, current_exposure)
             if alert:
+                if alert.sizing and alert.sizing.bet_amount > 0:
+                    current_exposure += alert.sizing.bet_amount
                 alerts.append(alert)
+                size_str = ""
+                if alert.sizing:
+                    size_str = f" | bet ${alert.sizing.bet_amount:,.0f} ({alert.sizing.bet_pct_bankroll:.1%})"
+                    if alert.sizing.capped:
+                        size_str += f" [{alert.sizing.cap_reason}]"
                 logger.info(
-                    "  ** ALERT: %s divergence on '%s' — bet %s",
+                    "  ** ALERT: %s divergence on '%s' — bet %s%s",
                     alert.divergence_pct,
                     alert.market.question,
                     alert.recommended_side,
+                    size_str,
                 )
 
     # Send email if we found opportunities

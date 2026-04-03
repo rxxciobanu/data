@@ -31,5 +31,13 @@ class Settings(BaseSettings):
     # Aggregation method: "extremized", "log_odds", or "weighted_avg"
     aggregation_method: str = os.getenv("AGGREGATION_METHOD", "extremized")
 
+    # Position sizing (Kelly Criterion)
+    # Set BANKROLL > 0 to enable bet sizing. $0 = sizing disabled.
+    bankroll: float = float(os.getenv("BANKROLL", "0"))
+    kelly_fraction: float = float(os.getenv("KELLY_FRACTION", "0.25"))       # Quarter-Kelly
+    max_bet_pct: float = float(os.getenv("MAX_BET_PCT", "0.05"))             # 5% per market
+    max_total_exposure: float = float(os.getenv("MAX_TOTAL_EXPOSURE", "0.25"))  # 25% total
+    min_bet_size: float = float(os.getenv("MIN_BET_SIZE", "5"))              # $5 minimum
+
 
 settings = Settings()

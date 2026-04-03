@@ -18,6 +18,7 @@ class Market(BaseModel):
     end_date: str = ""
     volume: float = 0.0
     liquidity: float = 0.0
+    price_is_live: bool = False  # True when CLOB enrichment succeeded
 
     @property
     def yes_price(self) -> float:
@@ -46,6 +47,20 @@ class DebateResult(BaseModel):
     synthesis_reasoning: str
 
 
+class BetSizing(BaseModel):
+    """Kelly Criterion position sizing with all safety adjustments."""
+    kelly_raw: float           # Raw Kelly fraction f* (hard-capped at 0.60)
+    kelly_fractional: float    # After fractional Kelly setting (e.g. quarter-Kelly)
+    confidence_mult: float     # Confidence/agreement discount [0–1]
+    kelly_final: float         # kelly_fractional × confidence_mult
+    bet_amount: float          # Dollar amount after all caps
+    bet_pct_bankroll: float    # bet_amount / bankroll
+    bankroll: float            # For display context
+    edge: float                # abs(ai_prob – market_prob)
+    capped: bool               # True if risk caps reduced the amount
+    cap_reason: str = ""       # Which cap was binding (if any)
+
+
 class BettingAlert(BaseModel):
     market: Market
     polymarket_probability: float
@@ -53,6 +68,7 @@ class BettingAlert(BaseModel):
     divergence: float
     recommended_side: str  # "YES" or "NO"
     reasoning: str
+    sizing: BetSizing | None = None  # None when bankroll not configured
 
     @property
     def divergence_pct(self) -> str:

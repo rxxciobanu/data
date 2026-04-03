@@ -157,10 +157,13 @@ class PolymarketClient:
 
     def _enrich_prices(self, market: Market) -> None:
         """Update token prices with live midpoint from CLOB."""
+        any_live = False
         for token in market.tokens:
             try:
                 price = self.get_market_odds(token.token_id)
                 if price > 0:
                     token.price = price
+                    any_live = True
             except Exception:
                 pass
+        market.price_is_live = any_live

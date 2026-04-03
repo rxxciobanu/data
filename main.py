@@ -28,7 +28,17 @@ def main() -> None:
         "--concurrency", type=int, default=5,
         help="Number of markets to debate in parallel (default: 5)",
     )
+    parser.add_argument(
+        "--bankroll", type=float, default=None,
+        help="Bankroll in USD for position sizing (overrides BANKROLL env var). "
+             "Omit or set to 0 to disable sizing.",
+    )
     args = parser.parse_args()
+
+    # Override bankroll before importing settings (env var already loaded by dotenv)
+    if args.bankroll is not None:
+        import os
+        os.environ["BANKROLL"] = str(args.bankroll)
 
     logging.basicConfig(
         level=logging.INFO,
@@ -38,18 +48,35 @@ def main() -> None:
     logger = logging.getLogger(__name__)
 
     # Late import so dotenv loads before anything touches settings
+    from polymarket_orchestrator.config import settings
     from polymarket_orchestrator.orchestrator import run_analysis
 
     limit_desc = f"top {args.limit}" if args.limit else "ALL"
-    logger.info("=== Polymarket AI Orchestrator === (%s markets, concurrency=%d)", limit_desc, args.concurrency)
+    bankroll_desc = f", bankroll=${settings.bankroll:,.0f}" if settings.bankroll > 0 else ""
+    logger.info(
+        "=== Polymarket AI Orchestrator === (%s markets, concurrency=%d%s)",
+        limit_desc, args.concurrency, bankroll_desc,
+    )
     alerts = asyncio.run(run_analysis(market_limit=args.limit, concurrency=args.concurrency))
 
     if alerts:
         logger.info("--- Summary: %d opportunity(ies) found ---", len(alerts))
         for a in alerts:
+            size_str = ""
+            if a.sizing and a.sizing.bet_amount > 0:
+                size_str = f"  ${a.sizing.bet_amount:>8,.0f} ({a.sizing.bet_pct_bankroll:.1%})"
+                if a.sizing.capped:
+                    size_str += f" [{a.sizing.cap_reason}]"
             print(
-                f"  {a.recommended_side:>3}  {a.divergence_pct:>6}  {a.market.question}"
+                f"  {a.recommended_side:>3}  {a.divergence_pct:>6}{size_str}  {a.market.question}"
             )
+
+        # Total exposure footer
+        sized = [a for a in alerts if a.sizing and a.sizing.bet_amount > 0]
+        if sized:
+            total = sum(a.sizing.bet_amount for a in sized)
+            print(f"\n  Total exposure: ${total:,.2f} / ${settings.bankroll:,.0f} "
+                  f"({total / settings.bankroll:.1%} of bankroll)")
     else:
         logger.info("No opportunities above threshold. Done.")
 
