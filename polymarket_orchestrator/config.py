@@ -39,5 +39,10 @@ class Settings(BaseSettings):
     max_total_exposure: float = float(os.getenv("MAX_TOTAL_EXPOSURE", "0.25"))  # 25% total
     min_bet_size: float = float(os.getenv("MIN_BET_SIZE", "5"))              # $5 minimum
 
+    # News integration
+    newsdata_api_key: str = os.getenv("NEWSDATA_API_KEY", "")
+    news_enabled: bool = os.getenv("NEWS_ENABLED", "true").lower() in ("true", "1", "yes")
+    news_max_articles: int = int(os.getenv("NEWS_MAX_ARTICLES", "5"))
+
 
 settings = Settings()

@@ -13,11 +13,11 @@ from polymarket_orchestrator.sizing import compute_bet_size
 logger = logging.getLogger(__name__)
 
 
-async def _debate_market(market: Market) -> DebateResult | None:
+async def _debate_market(market: Market, news_articles: list | None = None) -> DebateResult | None:
     """Run debate on a single market, returning None on failure."""
     try:
         logger.info("Debating: %s", market.question)
-        result = await run_debate(market)
+        result = await run_debate(market, news_articles=news_articles)
         logger.info(
             "  Consensus: %.1f%% (Polymarket: %.1f%%)",
             result.consensus_probability * 100,
@@ -99,6 +99,15 @@ async def run_analysis(
         logger.warning("No active markets found.")
         return []
 
+    # Initialize news aggregator (graceful degradation if unavailable)
+    aggregator = None
+    if settings.news_enabled:
+        try:
+            from polymarket_orchestrator.news import NewsAggregator
+            aggregator = NewsAggregator(settings)
+        except Exception as e:
+            logger.warning("News aggregator init failed: %s. Continuing without news.", e)
+
     # Debate markets in batches of `concurrency` for throughput + rate-limit safety
     alerts: list[BettingAlert] = []
     current_exposure = 0.0  # Tracks cumulative bet amounts for portfolio cap
@@ -111,8 +120,17 @@ async def run_analysis(
             batch_start + 1, batch_end, total,
         )
 
+        # Pre-fetch news for the entire batch
+        batch_news: dict[str, list] = {}
+        if aggregator:
+            try:
+                batch_news = await aggregator.get_news_for_batch(batch)
+            except Exception as e:
+                logger.warning("News fetch failed for batch: %s", e)
+
         results = await asyncio.gather(
-            *(_debate_market(m) for m in batch),
+            *(_debate_market(m, news_articles=batch_news.get(m.id))
+              for m in batch),
             return_exceptions=False,
         )
 
@@ -136,6 +154,10 @@ async def run_analysis(
                     alert.recommended_side,
                     size_str,
                 )
+
+    # Cleanup news aggregator
+    if aggregator:
+        await aggregator.close()
 
     # Send email if we found opportunities
     if alerts:
