@@ -20,11 +20,12 @@ def _get_client() -> PolymarketClient:
 
 
 @mcp.tool
-def get_active_markets(limit: int = 10) -> str:
+def get_active_markets(limit: int | None = None) -> str:
     """Fetch active prediction markets from Polymarket, sorted by liquidity.
 
     Args:
-        limit: Maximum number of markets to return (default 10).
+        limit: Maximum number of markets to return.  Pass None (default) to
+            fetch ALL active markets via automatic pagination.
 
     Returns:
         JSON list of markets with question, outcomes, prices, volume, and liquidity.

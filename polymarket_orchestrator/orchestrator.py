@@ -52,39 +52,65 @@ def _check_divergence(result: DebateResult) -> BettingAlert | None:
     )
 
 
-async def run_analysis() -> list[BettingAlert]:
-    """Main orchestration: fetch markets, debate, detect opportunities, notify."""
+async def run_analysis(
+    market_limit: int | None = None,
+    concurrency: int = 5,
+) -> list[BettingAlert]:
+    """Main orchestration: fetch markets, debate, detect opportunities, notify.
+
+    Args:
+        market_limit: Max markets to fetch.  ``None`` means **all** active
+            markets on Polymarket (paginated automatically).
+        concurrency: How many markets to debate in parallel.  Keeps API
+            usage reasonable while still being fast.
+    """
     logger.info("Fetching active markets from Polymarket...")
     client = PolymarketClient()
-    markets = client.get_active_markets()
+    markets = client.get_active_markets(limit=market_limit)
     logger.info("Found %d markets to analyze.", len(markets))
 
     if not markets:
         logger.warning("No active markets found.")
         return []
 
-    # Debate each market (sequentially to respect API rate limits)
+    # Debate markets in batches of `concurrency` for throughput + rate-limit safety
     alerts: list[BettingAlert] = []
-    for market in markets:
-        result = await _debate_market(market)
-        if result is None:
-            continue
-        alert = _check_divergence(result)
-        if alert:
-            alerts.append(alert)
-            logger.info(
-                "  ** ALERT: %s divergence on '%s' — bet %s",
-                alert.divergence_pct,
-                market.question,
-                alert.recommended_side,
-            )
+    total = len(markets)
+    for batch_start in range(0, total, concurrency):
+        batch = markets[batch_start : batch_start + concurrency]
+        batch_end = min(batch_start + len(batch), total)
+        logger.info(
+            "Debating batch %d–%d of %d markets...",
+            batch_start + 1, batch_end, total,
+        )
+
+        results = await asyncio.gather(
+            *(_debate_market(m) for m in batch),
+            return_exceptions=False,
+        )
+
+        for result in results:
+            if result is None:
+                continue
+            alert = _check_divergence(result)
+            if alert:
+                alerts.append(alert)
+                logger.info(
+                    "  ** ALERT: %s divergence on '%s' — bet %s",
+                    alert.divergence_pct,
+                    alert.market.question,
+                    alert.recommended_side,
+                )
 
     # Send email if we found opportunities
     if alerts:
-        logger.info("Sending email with %d alert(s)...", len(alerts))
+        logger.info("Sending email with %d alert(s) out of %d markets analyzed.", len(alerts), total)
         send_alert_email(alerts)
         logger.info("Email sent successfully.")
     else:
-        logger.info("No betting opportunities found (threshold: %.0f%%).", settings.alert_threshold * 100)
+        logger.info(
+            "No betting opportunities found across %d markets (threshold: %.0f%%).",
+            total, settings.alert_threshold * 100,
+        )
 
     return alerts

@@ -18,23 +18,56 @@ class PolymarketClient:
         self._http = httpx.Client(timeout=30)
 
     def get_active_markets(self, limit: int | None = None) -> list[Market]:
-        """Fetch active, open markets from the Gamma API."""
-        limit = limit or settings.max_markets
-        resp = self._http.get(
-            f"{self.gamma_url}/markets",
-            params={
-                "active": "true",
-                "closed": "false",
-                "limit": limit,
-                "order": "liquidityNum",
-                "ascending": "false",
-            },
-        )
-        resp.raise_for_status()
-        raw_markets = resp.json()
+        """Fetch active, open markets from the Gamma API.
+
+        When *limit* is ``None`` (the default) **all** active markets are
+        fetched by paginating through the Gamma API automatically.  Set
+        *limit* to a positive integer to cap the number of markets returned.
+        """
+        fetch_all = limit is None
+        page_size = 100  # Gamma API max per request
+        if not fetch_all:
+            page_size = min(limit, page_size)
+
+        all_raw: list[dict] = []
+        offset = 0
+
+        while True:
+            want = page_size if fetch_all else min(page_size, limit - len(all_raw))
+            if want <= 0:
+                break
+
+            resp = self._http.get(
+                f"{self.gamma_url}/markets",
+                params={
+                    "active": "true",
+                    "closed": "false",
+                    "limit": want,
+                    "offset": offset,
+                    "order": "liquidityNum",
+                    "ascending": "false",
+                },
+            )
+            resp.raise_for_status()
+            page = resp.json()
+
+            if not page:
+                break  # No more results
+
+            all_raw.extend(page)
+            offset += len(page)
+            logger.info("Fetched %d markets so far (page of %d)...", len(all_raw), len(page))
+
+            # If we got fewer than requested, we've reached the end
+            if len(page) < want:
+                break
+            # Safety cap when fetching all — don't loop forever
+            if fetch_all and len(all_raw) >= 10_000:
+                logger.warning("Safety cap reached at %d markets.", len(all_raw))
+                break
 
         markets: list[Market] = []
-        for m in raw_markets:
+        for m in all_raw:
             tokens = self._parse_tokens(m)
             if not tokens:
                 continue
@@ -50,6 +83,8 @@ class PolymarketClient:
                     liquidity=float(m.get("liquidity", 0) or 0),
                 )
             )
+
+        logger.info("Parsed %d markets with valid tokens out of %d total.", len(markets), len(all_raw))
 
         # Enrich with live CLOB prices
         for market in markets:
