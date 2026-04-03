@@ -2,20 +2,36 @@
 
 Three methods are implemented, each grounded in forecasting research:
 
-1. **Confidence-weighted average**: Weights each agent's probability by a
-   numeric confidence score. Simple and interpretable.
+1. **Confidence-weighted average**: Arithmetic mean weighted by confidence.
+   Simple baseline, but known to be under-confident (herds toward 50%).
 
-2. **Log-odds (logarithmic) pooling**: Averages in log-odds space, which
-   respects the multiplicative nature of evidence. A 90% and a 10% average
-   to 50% in linear space but remain more extreme in log-odds space when
-   one agent has higher confidence.
+2. **Geometric mean of odds** (log-odds pooling): The Bayesian-optimal
+   aggregator. Averages in log-odds space (equivalent to the geometric
+   mean of odds ratios). Satisfies "external Bayesianity" — the only
+   pooling rule that does (Genest, 1984).
 
-3. **Extremized aggregate**: Takes a weighted average then pushes it away
-   from 50% by a tunable factor. Corrects for the well-documented
-   "herding toward 50%" bias in group forecasts (Satopää et al., 2014).
+3. **Extremized geometric mean of odds**: The recommended method.
+   Applies the geometric mean of odds, then raises the result to a
+   power d > 1 to correct for shared information / herding.
 
-Each method returns a probability in [0.01, 0.99] to avoid degenerate
-values at the boundaries.
+   Source: Satopää, Baron, Foster, Mellers, Tetlock & Ungar (2014),
+   "Combining multiple probability predictions using a simple logit model",
+   International Journal of Forecasting 30(2): 344–356.
+
+   The paper's formula for N experts with odds o_i = p_i / (1 - p_i):
+
+     ô = (∏ o_i^(w_i))^(d / Σw_i)
+
+   In log-odds space this becomes:
+
+     L = d × Σ(w_i × ln(o_i)) / Σ(w_i)
+     p = sigmoid(L) = 1 / (1 + e^(-L))
+
+   Optimal d was found between 1.161 and 3.921 on IARPA ACE data,
+   with d = 2.5 as the suggested heuristic for independent human
+   forecasters.
+
+Each method returns a probability clamped to [0.01, 0.99].
 """
 from __future__ import annotations
 
@@ -45,13 +61,15 @@ def _confidence_weight(opinion: AgentOpinion) -> float:
 
 
 def _to_logodds(p: float) -> float:
-    """Convert probability to log-odds: log(p / (1 - p))."""
+    """Convert probability to log-odds: ln(p / (1 - p))."""
     p = _clamp(p)
     return math.log(p / (1.0 - p))
 
 
 def _from_logodds(lo: float) -> float:
     """Convert log-odds back to probability: 1 / (1 + exp(-lo))."""
+    # Clamp the log-odds to avoid overflow in exp()
+    lo = max(-10.0, min(10.0, lo))
     return _clamp(1.0 / (1.0 + math.exp(-lo)))
 
 
@@ -62,11 +80,10 @@ def _from_logodds(lo: float) -> float:
 def weighted_average(opinions: list[AgentOpinion]) -> float:
     """Weighted arithmetic mean of agent probabilities.
 
-    Each agent's estimate is weighted by their confidence level:
-      low=1, medium=2, high=3.
+    Formula:  p = Σ(w_i × p_i) / Σ(w_i)
 
-    Formula:
-      p = Σ(w_i * p_i) / Σ(w_i)
+    Simple but known to be poorly calibrated — it systematically
+    underweights extreme probabilities and herds toward 50%.
     """
     if not opinions:
         return 0.5
@@ -82,25 +99,24 @@ def weighted_average(opinions: list[AgentOpinion]) -> float:
 
 
 # -----------------------------------------------------------------------
-# Method 2: Log-odds pooling (logarithmic opinion pool)
+# Method 2: Geometric mean of odds (log-odds pooling)
 # -----------------------------------------------------------------------
 
-def log_odds_pooling(opinions: list[AgentOpinion]) -> float:
-    """Confidence-weighted average in log-odds space.
+def geo_mean_of_odds(opinions: list[AgentOpinion]) -> float:
+    """Confidence-weighted geometric mean of odds.
 
-    Log-odds pooling is the Bayesian-optimal way to combine independent
-    probability estimates. It treats each agent's opinion as independent
-    evidence and combines them multiplicatively.
+    This is equivalent to a weighted average in log-odds space.
+    It is the only aggregation method that satisfies "external
+    Bayesianity" (Genest 1984) and minimizes average KL divergence
+    to the individual expert distributions.
 
     Formula:
-      log_odds_combined = Σ(w_i * log(p_i / (1 - p_i))) / Σ(w_i)
-      p = sigmoid(log_odds_combined)
+      L = Σ(w_i × ln(p_i / (1 - p_i))) / Σ(w_i)
+      p = 1 / (1 + e^(-L))
 
-    Properties:
-    - A single high-confidence extreme opinion pulls harder than in
-      linear averaging.
-    - Symmetric: 80% and 20% with equal weights → exactly 50%.
-    - Respects the information content of extreme probabilities.
+    Equivalently in odds space:
+      ô = (∏ o_i^w_i)^(1 / Σw_i)    [weighted geometric mean]
+      p = ô / (1 + ô)
     """
     if not opinions:
         return 0.5
@@ -116,50 +132,63 @@ def log_odds_pooling(opinions: list[AgentOpinion]) -> float:
 
 
 # -----------------------------------------------------------------------
-# Method 3: Extremized aggregate
+# Method 3: Extremized geometric mean of odds (Satopää et al. 2014)
 # -----------------------------------------------------------------------
 
 def extremized_aggregate(
     opinions: list[AgentOpinion],
     extremization_factor: float = 1.5,
 ) -> float:
-    """Weighted average with extremization to correct for herding.
+    """Geometric mean of odds raised to power d > 1.
 
-    Forecaster groups systematically underreact — their average tends
-    toward 50% more than the truth warrants. Extremization corrects this
-    by raising the aggregate in log-odds space by a factor > 1.
+    This is the method recommended by Satopää et al. (2014) for
+    combining probability forecasts. It corrects for the well-documented
+    tendency of forecast aggregates to be under-confident (too close
+    to 50%), which arises from shared information among forecasters.
 
-    Based on: Satopää et al. (2014) "Combining multiple probability
-    predictions using a simple logit model."
+    Formula (the correct one from the paper):
+      L = Σ(w_i × ln(p_i / (1 - p_i))) / Σ(w_i)   [geo mean of odds]
+      L' = d × L                                     [extremize]
+      p = 1 / (1 + e^(-L'))                          [back to prob]
 
-    Steps:
-      1. Compute confidence-weighted linear average → p_bar
-      2. Convert to log-odds → L = log(p_bar / (1 - p_bar))
-      3. Extremize → L' = L * extremization_factor
-      4. Convert back → p_final = sigmoid(L')
+    Equivalently in odds space:
+      ô = (∏ o_i^w_i)^(d / Σw_i)
+      p = ô / (1 + ô)
 
-    Recommended factor values:
-      1.0 = no correction (same as weighted average)
-      1.5 = mild correction (default — good for diverse agent panels)
-      2.5 = standard correction (IARPA ACE tournament calibration)
-      3.5 = aggressive correction (very consensus-seeking agents)
+    IMPORTANT: The extremization factor d multiplies the LOG-ODDS
+    from the geometric mean of odds — NOT from the arithmetic mean
+    of probabilities. This distinction matters because the arithmetic
+    mean and geometric mean of odds give different base values,
+    especially for extreme probabilities.
+
+    Optimal d from Satopää et al. (2014) on IARPA ACE geopolitical
+    forecasting data: between 1.161 and 3.921, with d ≈ 2.5 as
+    the suggested heuristic for pools of independent human forecasters.
+
+    For LLM agents (which share training data and thus have correlated
+    biases), we default to d = 1.5 to avoid over-extremizing.
 
     Args:
-        opinions: List of agent opinions with probabilities and confidence.
-        extremization_factor: How aggressively to push away from 50%.
-            Default 1.5 (mild correction for diverse agent panels).
+        opinions: Agent opinions with probabilities and confidence.
+        extremization_factor: Power d. Default 1.5 for LLM agents.
+            Use 2.5 for independent human forecasters.
     """
     if not opinions:
         return 0.5
 
-    # Step 1: confidence-weighted linear average
-    p_bar = weighted_average(opinions)
+    # Step 1: Weighted average in log-odds space (geometric mean of odds)
+    total_weight = 0.0
+    weighted_logodds = 0.0
+    for op in opinions:
+        w = _confidence_weight(op)
+        weighted_logodds += w * _to_logodds(op.probability)
+        total_weight += w
+    geo_logodds = weighted_logodds / total_weight
 
-    # Step 2-3: extremize in log-odds space
-    logodds = _to_logodds(p_bar)
-    extremized_logodds = logodds * extremization_factor
+    # Step 2: Extremize by multiplying log-odds by factor d
+    extremized_logodds = geo_logodds * extremization_factor
 
-    # Step 4: back to probability
+    # Step 3: Convert back to probability
     return _from_logodds(extremized_logodds)
 
 
@@ -175,7 +204,7 @@ def aggregate_opinions(
 
     Args:
         opinions: Agent opinions to aggregate.
-        method: One of "weighted_avg", "log_odds", "extremized".
+        method: One of "weighted_avg", "geo_mean_odds", "extremized".
 
     Returns:
         (consensus_probability, explanation_string)
@@ -185,39 +214,40 @@ def aggregate_opinions(
 
     # Compute all three for the explanation
     p_weighted = weighted_average(opinions)
-    p_logodds = log_odds_pooling(opinions)
+    p_geo = geo_mean_of_odds(opinions)
     p_extremized = extremized_aggregate(opinions)
 
     # Format the breakdown
     agent_parts = []
     for op in opinions:
         w = _confidence_weight(op)
+        lo = _to_logodds(op.probability)
         agent_parts.append(
             f"{op.agent_name}: {op.probability:.1%} "
-            f"(confidence={op.confidence}, weight={w:.0f})"
+            f"(conf={op.confidence}, w={w:.0f}, log-odds={lo:+.3f})"
         )
     agent_summary = "\n".join(agent_parts)
 
     explanation = (
         f"Agent estimates:\n{agent_summary}\n\n"
         f"Aggregation results:\n"
-        f"  Confidence-weighted average: {p_weighted:.1%}\n"
-        f"  Log-odds pooling:            {p_logodds:.1%}\n"
-        f"  Extremized (factor=1.5):     {p_extremized:.1%}\n\n"
+        f"  Weighted average (arithmetic):   {p_weighted:.1%}\n"
+        f"  Geometric mean of odds:          {p_geo:.1%}\n"
+        f"  Extremized geo-mean (d=1.5):     {p_extremized:.1%}\n\n"
     )
 
     if method == "weighted_avg":
         result = p_weighted
-        explanation += f"Selected method: confidence-weighted average → {result:.1%}"
-    elif method == "log_odds":
-        result = p_logodds
-        explanation += f"Selected method: log-odds pooling → {result:.1%}"
+        explanation += f"Selected: confidence-weighted average → {result:.1%}"
+    elif method in ("geo_mean_odds", "log_odds"):
+        result = p_geo
+        explanation += f"Selected: geometric mean of odds → {result:.1%}"
     else:  # extremized (default)
         result = p_extremized
         explanation += (
-            f"Selected method: extremized aggregate → {result:.1%}\n"
-            f"Extremization pushes the weighted average ({p_weighted:.1%}) "
-            f"away from 50% to correct for agent herding bias."
+            f"Selected: extremized geometric mean of odds → {result:.1%}\n"
+            f"Formula: p = sigmoid(d × mean_log_odds), d=1.5\n"
+            f"Source: Satopää et al. (2014), Int J Forecasting 30(2):344-356"
         )
 
     return result, explanation

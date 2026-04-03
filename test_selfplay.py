@@ -408,10 +408,10 @@ def run_orchestration() -> None:
 
         # Show all three methods
         from polymarket_orchestrator.aggregation import (
-            weighted_average, log_odds_pooling, extremized_aggregate,
+            weighted_average, geo_mean_of_odds, extremized_aggregate,
         )
         p_wa = weighted_average(opinions)
-        p_lo = log_odds_pooling(opinions)
+        p_lo = geo_mean_of_odds(opinions)
         p_ex = extremized_aggregate(opinions)
 
         print(f"\n  {'─' * 60}")
@@ -424,7 +424,7 @@ def run_orchestration() -> None:
 
         sel = settings.aggregation_method
         print(_bar(p_wa, "Weighted Avg", sel == "weighted_avg"))
-        print(_bar(p_lo, "Log-Odds Pool", sel == "log_odds"))
+        print(_bar(p_lo, "Geo Mean Odds", sel == "geo_mean_odds"))
         print(_bar(p_ex, "Extremized", sel == "extremized"))
         print(f"  {'─' * 60}")
         poly_bar = "█" * int(market.yes_price * 30) + "░" * (30 - int(market.yes_price * 30))
