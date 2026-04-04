@@ -69,6 +69,7 @@ class BettingAlert(BaseModel):
     recommended_side: str  # "YES" or "NO"
     reasoning: str
     sizing: BetSizing | None = None  # None when bankroll not configured
+    whale_signals: list = Field(default_factory=list)  # list[WhaleAlert]
 
     @property
     def divergence_pct(self) -> str:

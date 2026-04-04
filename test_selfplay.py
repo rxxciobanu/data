@@ -771,7 +771,195 @@ def run_news_tests() -> None:
     print(f"  {'─' * 60}")
 
 
+def run_whale_tests():
+    """Whale tracker unit tests — state persistence, trade detection, models."""
+    import json
+    import tempfile
+    from pathlib import Path
+    from polymarket_orchestrator.whale import (
+        WhaleWallet, WhaleTrade, WhalePosition, WalletStats, WhaleAlert,
+        WhaleReport, WhaleState, WhaleTracker, _parse_wallets, _safe_float,
+    )
+
+    print("\n")
+    print("=" * 70)
+    print("  WHALE TRACKER — UNIT TESTS")
+    print("=" * 70)
+
+    tests_passed = 0
+    tests_failed = 0
+
+    def check(name, condition, detail=""):
+        nonlocal tests_passed, tests_failed
+        if condition:
+            tests_passed += 1
+            status = "PASS"
+        else:
+            tests_failed += 1
+            status = "FAIL"
+        suffix = f" — {detail}" if detail else ""
+        print(f"  [{status}] {name}{suffix}")
+
+    # --- _parse_wallets ---
+    check("parse_wallets: empty string → empty list", _parse_wallets("") == [])
+    check("parse_wallets: whitespace → empty list", _parse_wallets("   ") == [])
+
+    wallets = _parse_wallets('[{"address":"0xabc","label":"Alpha"}]')
+    check("parse_wallets: JSON string parsed",
+          len(wallets) == 1 and wallets[0].address == "0xabc" and wallets[0].label == "Alpha")
+
+    wallets2 = _parse_wallets('[{"address":"0xdef"}]')
+    check("parse_wallets: missing label → default empty",
+          len(wallets2) == 1 and wallets2[0].label == "")
+
+    check("parse_wallets: invalid JSON → empty list",
+          _parse_wallets("not json") == [])
+
+    # --- _safe_float ---
+    check("safe_float: normal", _safe_float("42.5") == 42.5)
+    check("safe_float: None → default", _safe_float(None) == 0.0)
+    check("safe_float: garbage → default", _safe_float("abc") == 0.0)
+    check("safe_float: int", _safe_float(7) == 7.0)
+
+    # --- WhaleState persistence ---
+    with tempfile.TemporaryDirectory() as tmpdir:
+        state_path = Path(tmpdir) / "subdir" / "state.json"
+
+        # Load from missing file → empty state
+        state = WhaleState.load(state_path)
+        check("state: load missing → empty", state.last_seen == {} and state.last_run == "")
+
+        # Save and reload
+        state.last_seen["0xabc"] = "2026-04-03T10:00:00+00:00"
+        state.last_run = "2026-04-03T12:00:00+00:00"
+        state.save(state_path)
+        check("state: save creates directory", state_path.exists())
+
+        reloaded = WhaleState.load(state_path)
+        check("state: round-trip preserves last_seen",
+              reloaded.last_seen.get("0xabc") == "2026-04-03T10:00:00+00:00")
+        check("state: round-trip preserves last_run",
+              reloaded.last_run == "2026-04-03T12:00:00+00:00")
+
+    # Corrupt state file
+    with tempfile.TemporaryDirectory() as tmpdir:
+        bad_path = Path(tmpdir) / "bad.json"
+        bad_path.write_text("not valid json!!!")
+        state = WhaleState.load(bad_path)
+        check("state: corrupt file → empty state", state.last_seen == {})
+
+    # --- detect_new_trades ---
+    # Build some test trades
+    def make_trade(ts: str, usdc: float = 5000.0) -> WhaleTrade:
+        return WhaleTrade(
+            wallet_address="0xabc", wallet_label="Test",
+            market_question="Test market?", condition_id="cond_1",
+            outcome="Yes", side="BUY", usdc_size=usdc, price=0.65,
+            shares=usdc / 0.65, timestamp=ts,
+        )
+
+    trades = [
+        make_trade("2026-04-03T12:00:00+00:00"),
+        make_trade("2026-04-03T14:00:00+00:00"),
+        make_trade("2026-04-03T16:00:00+00:00"),
+    ]
+
+    # Create a tracker-like object to test detect_new_trades
+    class FakeTracker:
+        def __init__(self, state):
+            self._state = state
+        detect_new_trades = WhaleTracker.detect_new_trades
+
+    # First run (no last_seen) → bootstrap, return empty
+    state = WhaleState()
+    ft = FakeTracker(state)
+    new = ft.detect_new_trades("0xabc", trades)
+    check("detect: first run (no last_seen) → empty (bootstrap)", len(new) == 0)
+
+    # Second run with last_seen before all trades
+    state.last_seen["0xabc"] = "2026-04-03T10:00:00+00:00"
+    new = ft.detect_new_trades("0xabc", trades)
+    check("detect: all trades after last_seen → all returned", len(new) == 3)
+
+    # Last seen between trades
+    state.last_seen["0xabc"] = "2026-04-03T13:00:00+00:00"
+    new = ft.detect_new_trades("0xabc", trades)
+    check("detect: partial new trades → 2 returned", len(new) == 2,
+          f"got {len(new)}")
+
+    # Last seen after all trades → none new
+    state.last_seen["0xabc"] = "2026-04-03T18:00:00+00:00"
+    new = ft.detect_new_trades("0xabc", trades)
+    check("detect: all trades before last_seen → empty", len(new) == 0)
+
+    # --- Model construction ---
+    wallet = WhaleWallet(address="0xtest", label="TestWhale", leaderboard_pnl=50000.0)
+    check("model: WhaleWallet", wallet.address == "0xtest" and wallet.leaderboard_pnl == 50000.0)
+
+    pos = WhalePosition(
+        wallet_address="0xtest", wallet_label="TestWhale",
+        condition_id="cond_1", market_question="Will X happen?",
+        outcome="Yes", size=1000, avg_price=0.60, current_price=0.75,
+        initial_value=600, current_value=750, pnl=150, pnl_pct=25.0,
+    )
+    check("model: WhalePosition", pos.pnl == 150 and pos.pnl_pct == 25.0)
+
+    stats = WalletStats(
+        address="0xtest", label="TestWhale", portfolio_value=100000,
+        total_positions=10, profitable_positions=7, win_rate=0.7,
+        total_pnl=25000, top_positions=[pos],
+    )
+    check("model: WalletStats win_rate", stats.win_rate == 0.7)
+
+    trade = make_trade("2026-04-03T12:00:00+00:00", usdc=10000)
+    alert = WhaleAlert(trade=trade, wallet_stats=stats)
+    check("model: WhaleAlert", alert.overlaps_ai_alert is False)
+
+    report = WhaleReport(
+        wallet_stats=[stats], new_trades=[trade], alerts=[alert],
+    )
+    check("model: WhaleReport", len(report.alerts) == 1)
+
+    # --- Cross-reference with BettingAlert ---
+    from polymarket_orchestrator.models import BettingAlert, Market, Token
+
+    market = Market(
+        id="cond_1", question="Will X happen?",
+        outcomes=["Yes", "No"],
+        tokens=[Token(token_id="t1", outcome="Yes", price=0.65),
+                Token(token_id="t2", outcome="No", price=0.35)],
+    )
+    betting_alert = BettingAlert(
+        market=market, polymarket_probability=0.65,
+        ai_probability=0.80, divergence=0.15,
+        recommended_side="YES", reasoning="Test reasoning",
+    )
+    check("cross-ref: whale_signals starts empty",
+          betting_alert.whale_signals == [])
+
+    betting_alert.whale_signals = [alert]
+    check("cross-ref: whale_signals attached",
+          len(betting_alert.whale_signals) == 1)
+    check("cross-ref: whale signal has correct trade",
+          betting_alert.whale_signals[0].trade.usdc_size == 10000)
+
+    # --- Min trade size filtering ---
+    small_trade = make_trade("2026-04-03T17:00:00+00:00", usdc=50)
+    big_trade = make_trade("2026-04-03T17:00:00+00:00", usdc=5000)
+    all_trades = [small_trade, big_trade]
+    filtered = [WhaleAlert(trade=t) for t in all_trades if t.usdc_size >= 1000]
+    check("filter: min_trade_size=1000 filters $50 trade",
+          len(filtered) == 1 and filtered[0].trade.usdc_size == 5000)
+
+    print(f"\n  {'─' * 60}")
+    print(f"  Results: {tests_passed} passed, {tests_failed} failed")
+    if tests_failed == 0:
+        print("  All whale tracker tests passed.")
+    print(f"  {'─' * 60}")
+
+
 if __name__ == "__main__":
     run_orchestration()
     run_edge_case_tests()
     run_news_tests()
+    run_whale_tests()

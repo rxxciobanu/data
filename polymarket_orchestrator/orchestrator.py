@@ -108,6 +108,21 @@ async def run_analysis(
         except Exception as e:
             logger.warning("News aggregator init failed: %s. Continuing without news.", e)
 
+    # Whale tracker (graceful degradation if unavailable)
+    whale_report = None
+    if settings.whale_enabled:
+        try:
+            from polymarket_orchestrator.whale import WhaleTracker
+            tracker = WhaleTracker(settings)
+            whale_report = await tracker.scan_all()
+            await tracker.close()
+            logger.info(
+                "Whale scan: %d new trades, %d alerts.",
+                len(whale_report.new_trades), len(whale_report.alerts),
+            )
+        except Exception as e:
+            logger.warning("Whale tracking failed: %s. Continuing without whale data.", e)
+
     # Debate markets in batches of `concurrency` for throughput + rate-limit safety
     alerts: list[BettingAlert] = []
     current_exposure = 0.0  # Tracks cumulative bet amounts for portfolio cap
@@ -159,10 +174,26 @@ async def run_analysis(
     if aggregator:
         await aggregator.close()
 
-    # Send email if we found opportunities
-    if alerts:
-        logger.info("Sending email with %d alert(s) out of %d markets analyzed.", len(alerts), total)
-        send_alert_email(alerts)
+    # Cross-reference whale signals with AI alerts
+    if whale_report and whale_report.alerts:
+        whale_by_market: dict[str, list] = {}
+        for wa in whale_report.alerts:
+            whale_by_market.setdefault(wa.trade.condition_id, []).append(wa)
+
+        for alert in alerts:
+            market_whales = whale_by_market.pop(alert.market.id, [])
+            for wa in market_whales:
+                wa.overlaps_ai_alert = True
+            alert.whale_signals = market_whales
+
+    # Send email if we found opportunities (AI alerts or whale alerts)
+    has_whale_alerts = whale_report and whale_report.alerts
+    if alerts or has_whale_alerts:
+        logger.info(
+            "Sending email with %d AI alert(s) and %d whale alert(s).",
+            len(alerts), len(whale_report.alerts) if whale_report else 0,
+        )
+        send_alert_email(alerts, whale_report=whale_report)
         logger.info("Email sent successfully.")
     else:
         logger.info(

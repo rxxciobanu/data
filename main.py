@@ -33,12 +33,24 @@ def main() -> None:
         help="Bankroll in USD for position sizing (overrides BANKROLL env var). "
              "Omit or set to 0 to disable sizing.",
     )
+    parser.add_argument(
+        "--whale", action="store_true", default=None,
+        help="Enable whale wallet tracking (overrides WHALE_ENABLED env var)",
+    )
+    parser.add_argument(
+        "--no-whale", action="store_true", default=None,
+        help="Disable whale wallet tracking",
+    )
     args = parser.parse_args()
 
-    # Override bankroll before importing settings (env var already loaded by dotenv)
+    # Override env vars before importing settings
+    import os
     if args.bankroll is not None:
-        import os
         os.environ["BANKROLL"] = str(args.bankroll)
+    if args.whale:
+        os.environ["WHALE_ENABLED"] = "true"
+    elif args.no_whale:
+        os.environ["WHALE_ENABLED"] = "false"
 
     logging.basicConfig(
         level=logging.INFO,

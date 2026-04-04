@@ -44,5 +44,12 @@ class Settings(BaseSettings):
     news_enabled: bool = os.getenv("NEWS_ENABLED", "true").lower() in ("true", "1", "yes")
     news_max_articles: int = int(os.getenv("NEWS_MAX_ARTICLES", "5"))
 
+    # Whale wallet tracking
+    whale_enabled: bool = os.getenv("WHALE_ENABLED", "false").lower() in ("true", "1", "yes")
+    whale_leaderboard_count: int = int(os.getenv("WHALE_LEADERBOARD_COUNT", "20"))
+    whale_extra_wallets: str = os.getenv("WHALE_EXTRA_WALLETS", "")
+    whale_state_path: str = os.getenv("WHALE_STATE_PATH", "~/.polymarket/whale_state.json")
+    whale_min_trade_size: float = float(os.getenv("WHALE_MIN_TRADE_SIZE", "1000"))
+
 
 settings = Settings()
