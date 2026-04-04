@@ -47,14 +47,43 @@ def _format_whale_signals_html(signals: list) -> str:
     rows = []
     for ws in signals:
         t = ws.trade
+        # Overall stats
         stats_note = ""
         if ws.wallet_stats:
-            stats_note = f' (win rate: {ws.wallet_stats.win_rate:.0%}, PnL: ${ws.wallet_stats.total_pnl:,.0f})'
+            stats_note = f' (overall: {ws.wallet_stats.win_rate:.0%} win, ${ws.wallet_stats.total_pnl:,.0f} PnL)'
+
+        # Expert theme badge
+        expert_badge = ""
+        if ws.is_expert_trade and ws.matching_themes:
+            theme_names = ", ".join(ws.matching_themes)
+            # Find the best matching theme stats
+            best_te = None
+            if ws.wallet_stats:
+                for te in ws.wallet_stats.theme_expertise:
+                    if te.theme in ws.matching_themes and te.is_expert:
+                        if best_te is None or te.total_pnl > best_te.total_pnl:
+                            best_te = te
+            if best_te:
+                expert_badge = (
+                    f'<div style="display:inline-block;background:#dcfce7;color:#166534;'
+                    f'padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold;'
+                    f'margin-left:4px;">'
+                    f'EXPERT: {best_te.theme} ({best_te.win_rate:.0%} win, '
+                    f'{best_te.total_trades} trades, ${best_te.total_pnl:,.0f})'
+                    f'</div>'
+                )
+            else:
+                expert_badge = (
+                    f'<div style="display:inline-block;background:#dcfce7;color:#166534;'
+                    f'padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold;'
+                    f'margin-left:4px;">EXPERT: {theme_names}</div>'
+                )
+
         rows.append(
             f'<div style="padding:4px 8px;font-size:13px;color:#7c3aed;">'
             f'&#128011; <strong>{t.wallet_label}</strong> {t.side} '
             f'${t.usdc_size:,.0f} {t.outcome} at {t.price:.2f}'
-            f'{stats_note}'
+            f'{stats_note}{expert_badge}'
             f'</div>'
         )
     return (
@@ -119,15 +148,25 @@ def _format_whale_only_html(whale_report) -> str:
     if not whale_only:
         return ""
 
+    # Sort: expert trades first, then by trade size
+    whale_only.sort(key=lambda wa: (not wa.is_expert_trade, -wa.trade.usdc_size))
+
     rows = []
     for wa in whale_only:
         t = wa.trade
         stats_note = ""
         if wa.wallet_stats:
             stats_note = f' | Win rate: {wa.wallet_stats.win_rate:.0%}'
+        expert_mark = ""
+        if wa.is_expert_trade:
+            expert_mark = (
+                f' <span style="background:#dcfce7;color:#166534;padding:1px 6px;'
+                f'border-radius:3px;font-size:10px;font-weight:bold;">'
+                f'EXPERT: {", ".join(wa.matching_themes)}</span>'
+            )
         rows.append(
             f'<tr>'
-            f'<td style="padding:6px 8px;font-size:13px;">{t.wallet_label}{stats_note}</td>'
+            f'<td style="padding:6px 8px;font-size:13px;">{t.wallet_label}{stats_note}{expert_mark}</td>'
             f'<td style="padding:6px 8px;font-size:13px;font-weight:bold;">{t.side} {t.outcome}</td>'
             f'<td style="padding:6px 8px;font-size:13px;">${t.usdc_size:,.0f} @ {t.price:.2f}</td>'
             f'<td style="padding:6px 8px;font-size:13px;color:#6b7280;">{t.market_question[:60]}...</td>'
@@ -162,6 +201,7 @@ def _format_wallet_stats_html(whale_report) -> str:
     rows = []
     for ws in sorted(whale_report.wallet_stats, key=lambda s: s.total_pnl, reverse=True)[:10]:
         pnl_color = "#16a34a" if ws.total_pnl >= 0 else "#dc2626"
+        themes_str = ", ".join(ws.strong_themes) if ws.strong_themes else "-"
         rows.append(
             f'<tr>'
             f'<td style="padding:4px 8px;font-size:12px;">{ws.label}</td>'
@@ -170,6 +210,7 @@ def _format_wallet_stats_html(whale_report) -> str:
             f'<td style="padding:4px 8px;font-size:12px;color:{pnl_color};font-weight:bold;">'
             f'${ws.total_pnl:,.0f}</td>'
             f'<td style="padding:4px 8px;font-size:12px;">{ws.total_positions}</td>'
+            f'<td style="padding:4px 8px;font-size:12px;color:#6d28d9;">{themes_str}</td>'
             f'</tr>'
         )
 
@@ -183,6 +224,7 @@ def _format_wallet_stats_html(whale_report) -> str:
         <th style="padding:4px 8px;text-align:left;font-size:12px;">Win Rate</th>
         <th style="padding:4px 8px;text-align:left;font-size:12px;">PnL</th>
         <th style="padding:4px 8px;text-align:left;font-size:12px;">Positions</th>
+        <th style="padding:4px 8px;text-align:left;font-size:12px;">Expert Themes</th>
       </tr>
       {"".join(rows)}
     </table>

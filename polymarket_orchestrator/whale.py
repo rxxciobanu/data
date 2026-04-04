@@ -1,10 +1,19 @@
 """Whale wallet tracker — auto-discovers top Polymarket traders and alerts on new trades.
 
 Uses the Polymarket Data API (fully public, no auth):
-  - /leaderboard   — discover top profitable traders (30d window)
-  - /activity       — per-wallet trade history (BUY/SELL with timestamps)
-  - /positions      — current holdings with P&L breakdown
-  - /value          — total portfolio USD value
+  - /leaderboard       — discover top profitable traders (30d window)
+  - /activity           — per-wallet trade history (BUY/SELL with timestamps)
+  - /positions          — current holdings with P&L breakdown
+  - /closed-positions   — resolved positions with realizedPnl (for theme expertise)
+  - /value              — total portfolio USD value
+
+Theme Expertise System:
+  Every market is classified into themes (geopolitics, crypto, elections, etc.)
+  by keyword matching on the title.  For each wallet, we compute per-theme
+  win rate and P&L from closed (resolved) positions.  When a whale trades
+  in their proven domain of expertise, alerts are flagged as high-conviction
+  copy signals: "Whale_Alpha (82% win rate on geopolitics, +$45k) just
+  bought $20k YES on Iran sanctions market."
 
 State is persisted between runs as a small JSON file so only genuinely
 new trades trigger alerts.  First run bootstraps silently (no alert flood).
@@ -26,6 +35,86 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 DATA_API = "https://data-api.polymarket.com"
+
+# ---------------------------------------------------------------------------
+# Theme taxonomy — classify markets by keyword matching on title
+# ---------------------------------------------------------------------------
+
+# Each theme has a name, a set of keywords (case-insensitive substring match
+# on market title), and a minimum number of keyword hits to classify.
+# A market can belong to multiple themes.
+
+THEME_KEYWORDS: dict[str, list[str]] = {
+    "geopolitics": [
+        "iran", "iraq", "russia", "ukraine", "china", "taiwan", "north korea",
+        "nato", "sanctions", "war", "invasion", "ceasefire", "missile",
+        "military", "troops", "nuclear", "weapons", "conflict", "diplomat",
+        "peace talks", "syria", "gaza", "israel", "hamas", "hezbollah",
+        "coup", "regime", "territorial", "border", "annex",
+    ],
+    "us_politics": [
+        "trump", "biden", "democrat", "republican", "gop", "congress",
+        "senate", "house of representatives", "midterm", "presidential",
+        "election", "nominee", "primary", "caucus", "impeach", "speaker",
+        "governor", "supreme court", "scotus", "executive order",
+        "inauguration", "cabinet", "vice president", "vp", "electoral",
+        "swing state", "approval rating", "poll",
+    ],
+    "crypto": [
+        "bitcoin", "btc", "ethereum", "eth", "crypto", "blockchain",
+        "defi", "nft", "solana", "sol", "xrp", "dogecoin", "altcoin",
+        "stablecoin", "usdt", "usdc", "binance", "coinbase", "halving",
+        "mining", "token", "memecoin", "web3",
+    ],
+    "economy": [
+        "recession", "inflation", "gdp", "unemployment", "fed ", "fomc",
+        "interest rate", "rate cut", "rate hike", "cpi", "jobs report",
+        "nonfarm", "debt ceiling", "default", "treasury", "yield",
+        "tariff", "trade war", "s&p 500", "s&p500", "nasdaq", "dow jones",
+        "stock market", "bear market", "bull market", "ipo",
+    ],
+    "tech": [
+        "ai ", "artificial intelligence", "openai", "chatgpt", "gpt",
+        "google", "apple", "meta", "microsoft", "nvidia", "tesla",
+        "spacex", "launch", "rocket", "starship", "agi", "llm",
+        "semiconductor", "chip", "antitrust", "tiktok",
+    ],
+    "sports": [
+        "nba", "nfl", "mlb", "nhl", "soccer", "football", "basketball",
+        "baseball", "tennis", "golf", "olympics", "world cup", "super bowl",
+        "championship", "playoffs", "mvp", "premier league", "champions league",
+        "ufc", "boxing", "f1", "formula 1", "grand prix",
+    ],
+    "culture": [
+        "oscar", "emmy", "grammy", "box office", "movie", "film",
+        "celebrity", "elon musk", "kanye", "taylor swift", "viral",
+        "social media", "twitter", "x.com", "tiktok ban",
+        "podcast", "streaming", "netflix", "disney",
+    ],
+    "science_health": [
+        "pandemic", "covid", "vaccine", "virus", "outbreak", "who ",
+        "fda", "drug", "clinical trial", "disease", "health",
+        "climate", "temperature", "carbon", "hurricane", "earthquake",
+        "wildfire", "drought", "nasa", "space", "mars", "moon",
+    ],
+}
+
+
+def classify_market_themes(title: str) -> list[str]:
+    """Classify a market into themes based on title keyword matching.
+
+    Returns a list of theme names (may be empty if no theme matches).
+    A market can match multiple themes (e.g. "US sanctions on Iran"
+    matches both 'geopolitics' and 'us_politics').
+    """
+    title_lower = title.lower()
+    themes = []
+    for theme, keywords in THEME_KEYWORDS.items():
+        hits = sum(1 for kw in keywords if kw in title_lower)
+        if hits >= 1:
+            themes.append(theme)
+    return themes
+
 
 # ---------------------------------------------------------------------------
 # Models
@@ -71,6 +160,30 @@ class WhalePosition(BaseModel):
     pnl_pct: float          # percentPnl
 
 
+class ClosedPosition(BaseModel):
+    """A resolved/closed position — used to compute theme expertise."""
+    wallet_address: str
+    condition_id: str
+    market_question: str
+    outcome: str
+    avg_price: float
+    realized_pnl: float         # Dollars gained/lost after resolution
+    realized_pnl_pct: float     # Percentage return
+    themes: list[str] = Field(default_factory=list)  # Classified themes
+
+
+class ThemeExpertise(BaseModel):
+    """A wallet's track record in a specific theme."""
+    theme: str
+    wins: int
+    losses: int
+    total_trades: int
+    win_rate: float             # wins / total_trades
+    total_pnl: float            # Sum of realizedPnl in this theme
+    avg_return_pct: float       # Average percentRealizedPnl
+    is_expert: bool = False     # True if win_rate >= 0.60 AND total_trades >= 3
+
+
 class WalletStats(BaseModel):
     """Performance summary for one wallet."""
     address: str
@@ -81,6 +194,8 @@ class WalletStats(BaseModel):
     win_rate: float
     total_pnl: float
     top_positions: list[WhalePosition] = Field(default_factory=list)
+    theme_expertise: list[ThemeExpertise] = Field(default_factory=list)
+    strong_themes: list[str] = Field(default_factory=list)  # Themes where is_expert=True
 
 
 class WhaleAlert(BaseModel):
@@ -88,6 +203,9 @@ class WhaleAlert(BaseModel):
     trade: WhaleTrade
     wallet_stats: WalletStats | None = None
     overlaps_ai_alert: bool = False
+    trade_themes: list[str] = Field(default_factory=list)     # Themes of the market traded
+    matching_themes: list[str] = Field(default_factory=list)   # Themes where whale is expert AND trade matches
+    is_expert_trade: bool = False  # True if at least one matching expert theme
 
 
 class WhaleReport(BaseModel):
@@ -321,12 +439,105 @@ class WhaleTracker:
             return _safe_float(raw.get("value"))
         return 0.0
 
+    async def fetch_closed_positions(self, address: str) -> list[ClosedPosition]:
+        """Fetch resolved/closed positions for theme expertise analysis.
+
+        Uses /closed-positions which returns positions with realizedPnl
+        (actual profit/loss after market resolution).
+        """
+        all_closed: list[ClosedPosition] = []
+        offset = 0
+        # Paginate to get full history (critical for accurate theme stats)
+        while True:
+            raw = await self._get("/closed-positions", {
+                "user": address,
+                "limit": 500,
+                "offset": offset,
+            })
+            if not isinstance(raw, list) or not raw:
+                break
+
+            for entry in raw:
+                try:
+                    title = entry.get("title", "")
+                    all_closed.append(ClosedPosition(
+                        wallet_address=address,
+                        condition_id=entry.get("conditionId", ""),
+                        market_question=title,
+                        outcome=entry.get("outcome", ""),
+                        avg_price=_safe_float(entry.get("avgPrice")),
+                        realized_pnl=_safe_float(entry.get("realizedPnl")),
+                        realized_pnl_pct=_safe_float(entry.get("percentRealizedPnl")),
+                        themes=classify_market_themes(title),
+                    ))
+                except Exception as e:
+                    logger.debug("Skip malformed closed position: %s", e)
+
+            if len(raw) < 500:
+                break  # Last page
+            offset += len(raw)
+
+        return all_closed
+
+    # ----- Theme expertise computation -----
+
+    @staticmethod
+    def compute_theme_expertise(
+        closed_positions: list[ClosedPosition],
+    ) -> list[ThemeExpertise]:
+        """Compute per-theme win rate and P&L from closed positions.
+
+        A wallet is considered an 'expert' in a theme if:
+          - win_rate >= 60% AND
+          - at least 3 resolved positions in that theme
+        """
+        # Accumulate stats per theme
+        theme_data: dict[str, dict] = {}
+        for pos in closed_positions:
+            for theme in pos.themes:
+                if theme not in theme_data:
+                    theme_data[theme] = {
+                        "wins": 0, "losses": 0, "total_pnl": 0.0,
+                        "return_pcts": [],
+                    }
+                td = theme_data[theme]
+                if pos.realized_pnl > 0:
+                    td["wins"] += 1
+                else:
+                    td["losses"] += 1
+                td["total_pnl"] += pos.realized_pnl
+                td["return_pcts"].append(pos.realized_pnl_pct)
+
+        expertise: list[ThemeExpertise] = []
+        for theme, td in theme_data.items():
+            total = td["wins"] + td["losses"]
+            win_rate = td["wins"] / total if total > 0 else 0.0
+            avg_ret = (
+                sum(td["return_pcts"]) / len(td["return_pcts"])
+                if td["return_pcts"] else 0.0
+            )
+            expertise.append(ThemeExpertise(
+                theme=theme,
+                wins=td["wins"],
+                losses=td["losses"],
+                total_trades=total,
+                win_rate=win_rate,
+                total_pnl=td["total_pnl"],
+                avg_return_pct=avg_ret,
+                is_expert=(win_rate >= 0.60 and total >= 3),
+            ))
+
+        # Sort by PnL descending
+        expertise.sort(key=lambda e: e.total_pnl, reverse=True)
+        return expertise
+
     # ----- Stats computation -----
 
     async def compute_stats(self, wallet: WhaleWallet) -> WalletStats:
-        """Build performance stats from positions + portfolio value."""
+        """Build performance stats from positions + portfolio value + theme expertise."""
         positions = await self.fetch_positions(wallet.address, wallet.label)
         value = await self.fetch_portfolio_value(wallet.address)
+        closed = await self.fetch_closed_positions(wallet.address)
 
         profitable = sum(1 for p in positions if p.pnl > 0)
         total_pnl = sum(p.pnl for p in positions)
@@ -334,6 +545,16 @@ class WhaleTracker:
 
         # Top 5 by absolute PnL
         top = sorted(positions, key=lambda p: abs(p.pnl), reverse=True)[:5]
+
+        # Theme expertise from closed (resolved) positions
+        theme_exp = self.compute_theme_expertise(closed)
+        strong = [te.theme for te in theme_exp if te.is_expert]
+
+        if strong:
+            logger.info(
+                "  %s: expert in %s (%d closed positions analyzed)",
+                wallet.label, ", ".join(strong), len(closed),
+            )
 
         return WalletStats(
             address=wallet.address,
@@ -344,6 +565,8 @@ class WhaleTracker:
             win_rate=win_rate,
             total_pnl=total_pnl,
             top_positions=top,
+            theme_expertise=theme_exp,
+            strong_themes=strong,
         )
 
     # ----- New trade detection -----
@@ -416,10 +639,19 @@ class WhaleTracker:
             if t.usdc_size >= self._min_trade_size
         ]
 
-        # Attach wallet stats to alerts
+        # Attach wallet stats + theme match scoring to alerts
         stats_by_addr = {s.address: s for s in all_stats}
         for alert in alerts:
             alert.wallet_stats = stats_by_addr.get(alert.trade.wallet_address)
+            # Classify the market being traded
+            alert.trade_themes = classify_market_themes(alert.trade.market_question)
+            # Check if whale is an expert in any of the trade's themes
+            if alert.wallet_stats and alert.trade_themes:
+                expert_themes = set(alert.wallet_stats.strong_themes)
+                alert.matching_themes = [
+                    t for t in alert.trade_themes if t in expert_themes
+                ]
+                alert.is_expert_trade = len(alert.matching_themes) > 0
 
         # Persist state
         self._state.last_run = datetime.now(timezone.utc).isoformat()

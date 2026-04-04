@@ -951,6 +951,141 @@ def run_whale_tests():
     check("filter: min_trade_size=1000 filters $50 trade",
           len(filtered) == 1 and filtered[0].trade.usdc_size == 5000)
 
+    # --- Theme classification ---
+    from polymarket_orchestrator.whale import (
+        classify_market_themes, ClosedPosition, ThemeExpertise,
+    )
+
+    themes = classify_market_themes("Will US impose new sanctions on Iran by 2026?")
+    check("theme: Iran sanctions → geopolitics", "geopolitics" in themes, str(themes))
+    check("theme: Iran sanctions → NOT us_politics (it's foreign policy)",
+          "us_politics" not in themes, str(themes))
+
+    themes2 = classify_market_themes("Will Bitcoin hit $90,000 in 2026?")
+    check("theme: Bitcoin → crypto", "crypto" in themes2, str(themes2))
+
+    themes3 = classify_market_themes("Will Trump win the 2028 presidential election?")
+    check("theme: Trump election → us_politics", "us_politics" in themes3, str(themes3))
+
+    themes4 = classify_market_themes("Will there be a recession in the US by 2026?")
+    check("theme: recession → economy", "economy" in themes4, str(themes4))
+
+    themes5 = classify_market_themes("Will the Lakers win the NBA championship?")
+    check("theme: Lakers NBA → sports", "sports" in themes5, str(themes5))
+
+    themes6 = classify_market_themes("Will OpenAI release GPT-5?")
+    check("theme: OpenAI GPT → tech", "tech" in themes6, str(themes6))
+
+    themes7 = classify_market_themes("Some totally random obscure question")
+    check("theme: unclassifiable → empty", themes7 == [], str(themes7))
+
+    # Multi-theme
+    themes8 = classify_market_themes("Will US troops be deployed to Ukraine by NATO?")
+    check("theme: US/Ukraine/NATO → geopolitics", "geopolitics" in themes8, str(themes8))
+
+    # --- Theme expertise computation ---
+    closed_positions = [
+        # 4 crypto wins, 1 crypto loss → expert (80% win rate)
+        ClosedPosition(wallet_address="0x", condition_id="c1",
+                       market_question="Will Bitcoin hit $100k?", outcome="Yes",
+                       avg_price=0.5, realized_pnl=5000, realized_pnl_pct=100,
+                       themes=["crypto"]),
+        ClosedPosition(wallet_address="0x", condition_id="c2",
+                       market_question="Will Ethereum pass $5k?", outcome="Yes",
+                       avg_price=0.6, realized_pnl=3000, realized_pnl_pct=75,
+                       themes=["crypto"]),
+        ClosedPosition(wallet_address="0x", condition_id="c3",
+                       market_question="Will Solana hit $300?", outcome="Yes",
+                       avg_price=0.4, realized_pnl=2000, realized_pnl_pct=50,
+                       themes=["crypto"]),
+        ClosedPosition(wallet_address="0x", condition_id="c4",
+                       market_question="Will XRP reach $2?", outcome="No",
+                       avg_price=0.7, realized_pnl=1500, realized_pnl_pct=40,
+                       themes=["crypto"]),
+        ClosedPosition(wallet_address="0x", condition_id="c5",
+                       market_question="Will Dogecoin hit $1?", outcome="Yes",
+                       avg_price=0.8, realized_pnl=-2000, realized_pnl_pct=-50,
+                       themes=["crypto"]),
+        # 1 geopolitics win, 1 loss → NOT expert (50% win, < 3 trades)
+        ClosedPosition(wallet_address="0x", condition_id="c6",
+                       market_question="Will Russia invade more of Ukraine?", outcome="Yes",
+                       avg_price=0.3, realized_pnl=8000, realized_pnl_pct=200,
+                       themes=["geopolitics"]),
+        ClosedPosition(wallet_address="0x", condition_id="c7",
+                       market_question="Will Iran nuclear deal be restored?", outcome="No",
+                       avg_price=0.5, realized_pnl=-3000, realized_pnl_pct=-60,
+                       themes=["geopolitics"]),
+    ]
+
+    expertise = WhaleTracker.compute_theme_expertise(closed_positions)
+    crypto_exp = next((e for e in expertise if e.theme == "crypto"), None)
+    geo_exp = next((e for e in expertise if e.theme == "geopolitics"), None)
+
+    check("expertise: crypto found", crypto_exp is not None)
+    check("expertise: crypto 5 trades", crypto_exp.total_trades == 5,
+          str(crypto_exp.total_trades) if crypto_exp else "None")
+    check("expertise: crypto 4 wins", crypto_exp.wins == 4,
+          str(crypto_exp.wins) if crypto_exp else "None")
+    check("expertise: crypto win_rate 80%",
+          abs(crypto_exp.win_rate - 0.80) < 0.01 if crypto_exp else False,
+          f"{crypto_exp.win_rate:.2f}" if crypto_exp else "None")
+    check("expertise: crypto IS expert (>=60% AND >=3 trades)",
+          crypto_exp.is_expert if crypto_exp else False)
+    check("expertise: crypto PnL = $9500",
+          abs(crypto_exp.total_pnl - 9500) < 1 if crypto_exp else False,
+          f"${crypto_exp.total_pnl:,.0f}" if crypto_exp else "None")
+
+    check("expertise: geopolitics found", geo_exp is not None)
+    check("expertise: geopolitics 2 trades", geo_exp.total_trades == 2,
+          str(geo_exp.total_trades) if geo_exp else "None")
+    check("expertise: geopolitics NOT expert (only 2 trades, 50% win)",
+          not geo_exp.is_expert if geo_exp else True)
+
+    # --- Expert trade matching ---
+    # Wallet is expert in crypto. New trade on crypto market → is_expert_trade.
+    ws_with_themes = WalletStats(
+        address="0xtest", label="CryptoKing", portfolio_value=100000,
+        total_positions=10, profitable_positions=7, win_rate=0.7,
+        total_pnl=9500,
+        theme_expertise=expertise,
+        strong_themes=["crypto"],
+    )
+    crypto_trade = WhaleTrade(
+        wallet_address="0xtest", wallet_label="CryptoKing",
+        market_question="Will Bitcoin reach $150k in 2027?", condition_id="new_1",
+        outcome="Yes", side="BUY", usdc_size=20000, price=0.45,
+        shares=44444, timestamp="2026-04-04T10:00:00+00:00",
+    )
+    wa = WhaleAlert(trade=crypto_trade, wallet_stats=ws_with_themes)
+    wa.trade_themes = classify_market_themes(crypto_trade.market_question)
+    expert_themes_set = set(ws_with_themes.strong_themes)
+    wa.matching_themes = [t for t in wa.trade_themes if t in expert_themes_set]
+    wa.is_expert_trade = len(wa.matching_themes) > 0
+
+    check("expert_trade: crypto whale on crypto market → is_expert=True",
+          wa.is_expert_trade is True)
+    check("expert_trade: matching_themes includes 'crypto'",
+          "crypto" in wa.matching_themes, str(wa.matching_themes))
+
+    # Same wallet trades sports market → NOT expert trade
+    sports_trade = WhaleTrade(
+        wallet_address="0xtest", wallet_label="CryptoKing",
+        market_question="Will the Lakers win the NBA championship?", condition_id="new_2",
+        outcome="Yes", side="BUY", usdc_size=10000, price=0.30,
+        shares=33333, timestamp="2026-04-04T11:00:00+00:00",
+    )
+    wa2 = WhaleAlert(trade=sports_trade, wallet_stats=ws_with_themes)
+    wa2.trade_themes = classify_market_themes(sports_trade.market_question)
+    wa2.matching_themes = [t for t in wa2.trade_themes if t in expert_themes_set]
+    wa2.is_expert_trade = len(wa2.matching_themes) > 0
+
+    check("expert_trade: crypto whale on sports market → is_expert=False",
+          wa2.is_expert_trade is False)
+
+    # --- Edge case: no closed positions → no expertise ---
+    empty_expertise = WhaleTracker.compute_theme_expertise([])
+    check("expertise: empty closed → empty expertise", empty_expertise == [])
+
     print(f"\n  {'─' * 60}")
     print(f"  Results: {tests_passed} passed, {tests_failed} failed")
     if tests_failed == 0:
