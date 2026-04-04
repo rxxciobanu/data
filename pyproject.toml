@@ -1,6 +1,6 @@
 [project]
 name = "polymarket-orchestrator"
-version = "0.1.0"
+version = "2.0.0"
 description = "AI orchestrator that debates Polymarket outcomes and alerts on betting opportunities"
 requires-python = ">=3.11"
 dependencies = [
@@ -15,6 +15,19 @@ dependencies = [
 
 [project.optional-dependencies]
 news = ["feedparser>=6.0.11"]
+saas = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "sqlalchemy[asyncio]>=2.0.0",
+    "asyncpg>=0.29.0",
+    "alembic>=1.13.0",
+    "redis>=5.0.0",
+    "celery[redis]>=5.4.0",
+    "python-jose[cryptography]>=3.3.0",
+    "passlib[bcrypt]>=1.7.4",
+    "python-multipart>=0.0.9",
+    "email-validator>=2.0.0",
+]
 
 [project.scripts]
 polymarket-orchestrator = "main:main"

@@ -1,0 +1,74 @@
+services:
+  api:
+    build: .
+    command: uvicorn saas.app:create_app --factory --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://polymarket:polymarket@db:5432/polymarket
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - .:/app
+
+  worker:
+    build: .
+    command: celery -A saas.workers.celery_app worker -l info -Q celery,debate -c 2
+    env_file: .env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://polymarket:polymarket@db:5432/polymarket
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - .:/app
+
+  beat:
+    build: .
+    command: celery -A saas.workers.celery_app beat -l info
+    env_file: .env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://polymarket:polymarket@db:5432/polymarket
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - .:/app
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: polymarket
+      POSTGRES_USER: polymarket
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-polymarket}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U polymarket"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+
+volumes:
+  pgdata:
+  redisdata:
