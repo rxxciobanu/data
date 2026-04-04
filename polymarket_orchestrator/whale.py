@@ -26,6 +26,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -236,9 +238,25 @@ class WhaleState(BaseModel):
         return cls()
 
     def save(self, path: Path) -> None:
+        """Atomic save: write to temp file, then os.replace (POSIX-atomic)."""
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(self.model_dump_json(indent=2))
+            data = self.model_dump_json(indent=2).encode()
+            fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+            closed = False
+            try:
+                os.write(fd, data)
+                os.close(fd)
+                closed = True
+                os.replace(tmp_path, path)
+            except BaseException:
+                if not closed:
+                    os.close(fd)
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
         except Exception as e:
             logger.warning("Failed to save whale state to %s: %s", path, e)
 
@@ -255,20 +273,42 @@ def _parse_wallets(raw: str) -> list[WhaleWallet]:
     try:
         path = Path(raw)
         if path.exists():
+            logger.info("Loading extra wallets from file: %s", path)
             raw = path.read_text()
         data = json.loads(raw)
+        if not isinstance(data, list):
+            logger.warning("WHALE_EXTRA_WALLETS must be a JSON array, got %s", type(data).__name__)
+            return []
         return [WhaleWallet(**w) for w in data]
+    except json.JSONDecodeError as e:
+        logger.warning("WHALE_EXTRA_WALLETS is not valid JSON: %s", e)
+        return []
     except Exception as e:
         logger.warning("Failed to parse WHALE_EXTRA_WALLETS: %s", e)
         return []
 
 
-def _safe_float(val, default: float = 0.0) -> float:
-    """Safely convert a value to float."""
+def _safe_float(
+    val,
+    default: float = 0.0,
+    min_val: float | None = None,
+    max_val: float | None = None,
+) -> float:
+    """Safely convert a value to float, with optional range clamping."""
     try:
-        return float(val) if val is not None else default
+        result = float(val) if val is not None else default
     except (ValueError, TypeError):
         return default
+    if min_val is not None and result < min_val:
+        return min_val
+    if max_val is not None and result > max_val:
+        return max_val
+    return result
+
+
+def _parse_ts(ts: str) -> datetime:
+    """Parse an ISO 8601 timestamp to a timezone-aware datetime."""
+    return datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +413,12 @@ class WhaleTracker:
         raw = await self._get("/activity", params)
         if not isinstance(raw, list):
             return []
+        if len(raw) == 500:
+            logger.warning(
+                "Activity fetch for %s returned exactly 500 results — "
+                "some trades may be missing due to pagination limit.",
+                address,
+            )
 
         trades: list[WhaleTrade] = []
         for entry in raw:
@@ -385,9 +431,9 @@ class WhaleTracker:
                     condition_id=entry.get("conditionId", ""),
                     outcome=entry.get("outcome", ""),
                     side=entry.get("side", ""),
-                    usdc_size=_safe_float(entry.get("usdcSize")),
-                    price=_safe_float(entry.get("price")),
-                    shares=_safe_float(entry.get("size")),
+                    usdc_size=_safe_float(entry.get("usdcSize"), min_val=0),
+                    price=_safe_float(entry.get("price"), min_val=0, max_val=1),
+                    shares=_safe_float(entry.get("size"), min_val=0),
                     timestamp=entry.get("timestamp", ""),
                     tx_hash=entry.get("transactionHash", ""),
                 ))
@@ -409,6 +455,12 @@ class WhaleTracker:
         })
         if not isinstance(raw, list):
             return []
+        if len(raw) == 500:
+            logger.warning(
+                "Positions fetch for %s returned exactly 500 results — "
+                "some positions may be missing.",
+                address,
+            )
 
         positions: list[WhalePosition] = []
         for entry in raw:
@@ -419,11 +471,11 @@ class WhaleTracker:
                     condition_id=entry.get("conditionId", ""),
                     market_question=entry.get("title", ""),
                     outcome=entry.get("outcome", ""),
-                    size=_safe_float(entry.get("size")),
-                    avg_price=_safe_float(entry.get("avgPrice")),
-                    current_price=_safe_float(entry.get("curPrice")),
-                    initial_value=_safe_float(entry.get("initialValue")),
-                    current_value=_safe_float(entry.get("currentValue")),
+                    size=_safe_float(entry.get("size"), min_val=0),
+                    avg_price=_safe_float(entry.get("avgPrice"), min_val=0, max_val=1),
+                    current_price=_safe_float(entry.get("curPrice"), min_val=0, max_val=1),
+                    initial_value=_safe_float(entry.get("initialValue"), min_val=0),
+                    current_value=_safe_float(entry.get("currentValue"), min_val=0),
                     pnl=_safe_float(entry.get("cashPnl")),
                     pnl_pct=_safe_float(entry.get("percentPnl")),
                 ))
@@ -447,8 +499,9 @@ class WhaleTracker:
         """
         all_closed: list[ClosedPosition] = []
         offset = 0
+        max_pages = 20  # Safety limit: 20 * 500 = 10,000 closed positions max
         # Paginate to get full history (critical for accurate theme stats)
-        while True:
+        for _page in range(max_pages):
             raw = await self._get("/closed-positions", {
                 "user": address,
                 "limit": 500,
@@ -476,6 +529,11 @@ class WhaleTracker:
             if len(raw) < 500:
                 break  # Last page
             offset += len(raw)
+        else:
+            logger.warning(
+                "Closed positions for %s hit %d-page safety limit (%d positions).",
+                address, max_pages, len(all_closed),
+            )
 
         return all_closed
 
@@ -503,8 +561,9 @@ class WhaleTracker:
                 td = theme_data[theme]
                 if pos.realized_pnl > 0:
                     td["wins"] += 1
-                else:
+                elif pos.realized_pnl < 0:
                     td["losses"] += 1
+                # Breakeven (realized_pnl == 0) excluded from win/loss count
                 td["total_pnl"] += pos.realized_pnl
                 td["return_pcts"].append(pos.realized_pnl_pct)
 
@@ -581,7 +640,19 @@ class WhaleTracker:
         last = self._state.last_seen.get(address)
         if last is None:
             return []  # First run: record timestamps, don't alert
-        return [t for t in trades if t.timestamp > last]
+        try:
+            last_dt = _parse_ts(last)
+        except (ValueError, TypeError):
+            logger.warning("Invalid last_seen timestamp for %s: %s", address, last)
+            return []
+        new = []
+        for t in trades:
+            try:
+                if _parse_ts(t.timestamp) > last_dt:
+                    new.append(t)
+            except (ValueError, TypeError):
+                logger.debug("Skipping trade with unparseable timestamp: %s", t.timestamp)
+        return new
 
     # ----- Main scan -----
 
@@ -597,10 +668,10 @@ class WhaleTracker:
         )
         new_trades = self.detect_new_trades(wallet.address, all_trades)
 
-        # Update last-seen to newest trade timestamp
+        # Update last-seen to newest trade timestamp (datetime-based comparison)
         if all_trades:
-            newest = max(t.timestamp for t in all_trades)
-            self._state.last_seen[wallet.address] = newest
+            newest = max(all_trades, key=lambda t: _parse_ts(t.timestamp))
+            self._state.last_seen[wallet.address] = newest.timestamp
 
         return stats, new_trades
 

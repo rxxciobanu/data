@@ -174,17 +174,31 @@ async def run_analysis(
     if aggregator:
         await aggregator.close()
 
-    # Cross-reference whale signals with AI alerts
+    # Cross-reference whale signals with AI alerts.
+    # Whale trades use condition_id (token-level) while Market uses id (market-level).
+    # Match via token IDs: build a mapping from each token_id → market alert.
     if whale_report and whale_report.alerts:
-        whale_by_market: dict[str, list] = {}
-        for wa in whale_report.alerts:
-            whale_by_market.setdefault(wa.trade.condition_id, []).append(wa)
+        # Build lookup: token_id → alert index (a market has multiple tokens)
+        token_to_alert: dict[str, int] = {}
+        for i, alert in enumerate(alerts):
+            for tok in alert.market.tokens:
+                token_to_alert[tok.token_id] = i
 
-        for alert in alerts:
-            market_whales = whale_by_market.pop(alert.market.id, [])
-            for wa in market_whales:
+        # Also try matching by market slug (whale trades have market_slug)
+        slug_to_alert: dict[str, int] = {}
+        for i, alert in enumerate(alerts):
+            # Derive slug from market id (Gamma API ids are often slug-like)
+            slug_to_alert[alert.market.id] = i
+
+        matched_indices: set[int] = set()
+        for wa in whale_report.alerts:
+            idx = token_to_alert.get(wa.trade.condition_id)
+            if idx is None and wa.trade.market_slug:
+                idx = slug_to_alert.get(wa.trade.market_slug)
+            if idx is not None:
                 wa.overlaps_ai_alert = True
-            alert.whale_signals = market_whales
+                alerts[idx].whale_signals.append(wa)
+                matched_indices.add(idx)
 
     # Send email if we found opportunities (AI alerts or whale alerts)
     has_whale_alerts = whale_report and whale_report.alerts

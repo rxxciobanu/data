@@ -1086,10 +1086,127 @@ def run_whale_tests():
     empty_expertise = WhaleTracker.compute_theme_expertise([])
     check("expertise: empty closed → empty expertise", empty_expertise == [])
 
+    # --- _safe_float with min/max ---
+    check("safe_float: min_val clamps negative", _safe_float("-5", min_val=0) == 0)
+    check("safe_float: max_val clamps high", _safe_float("999", max_val=1) == 1)
+    check("safe_float: within range untouched",
+          _safe_float("0.5", min_val=0, max_val=1) == 0.5)
+
+    # --- Breakeven trades excluded from win/loss ---
+    breakeven_positions = [
+        ClosedPosition(wallet_address="0x", condition_id="be1",
+                       market_question="Will Bitcoin hit $50k?", outcome="Yes",
+                       avg_price=0.5, realized_pnl=0.0, realized_pnl_pct=0.0,
+                       themes=["crypto"]),
+        ClosedPosition(wallet_address="0x", condition_id="be2",
+                       market_question="Will Ethereum hit $3k?", outcome="Yes",
+                       avg_price=0.5, realized_pnl=1000, realized_pnl_pct=100,
+                       themes=["crypto"]),
+    ]
+    be_exp = WhaleTracker.compute_theme_expertise(breakeven_positions)
+    be_crypto = next((e for e in be_exp if e.theme == "crypto"), None)
+    check("expertise: breakeven excluded from win/loss count",
+          be_crypto is not None and be_crypto.wins == 1 and be_crypto.losses == 0
+          and be_crypto.total_trades == 1,
+          f"wins={be_crypto.wins}, losses={be_crypto.losses}, total={be_crypto.total_trades}"
+          if be_crypto else "None")
+
+    # --- Timestamp comparison: mixed Z and +00:00 formats ---
+    from polymarket_orchestrator.whale import _parse_ts
+    t1 = _parse_ts("2026-04-03T12:00:00Z")
+    t2 = _parse_ts("2026-04-03T12:00:00+00:00")
+    check("timestamp: Z and +00:00 are equal", t1 == t2)
+
+    trades_mixed_tz = [
+        make_trade("2026-04-03T12:00:00Z"),
+        make_trade("2026-04-03T14:00:00+00:00"),
+    ]
+    state_tz = WhaleState()
+    state_tz.last_seen["0xabc"] = "2026-04-03T13:00:00Z"
+    ft_tz = FakeTracker(state_tz)
+    new_tz = ft_tz.detect_new_trades("0xabc", trades_mixed_tz)
+    check("detect: mixed Z/+00:00 timestamps → correct filtering",
+          len(new_tz) == 1, f"got {len(new_tz)}")
+
+    # --- _parse_wallets: non-list JSON → empty ---
+    check("parse_wallets: JSON object (not array) → empty",
+          _parse_wallets('{"address":"0x"}') == [])
+
     print(f"\n  {'─' * 60}")
     print(f"  Results: {tests_passed} passed, {tests_failed} failed")
     if tests_failed == 0:
         print("  All whale tracker tests passed.")
+    print(f"  {'─' * 60}")
+
+
+def run_robustness_tests():
+    """Additional robustness tests for aggregation and Kelly edge cases."""
+    from polymarket_orchestrator.aggregation import extremized_aggregate
+    from polymarket_orchestrator.sizing import kelly_fraction
+
+    print("\n")
+    print("=" * 70)
+    print("  ROBUSTNESS — EDGE CASE TESTS")
+    print("=" * 70)
+
+    tests_passed = 0
+    tests_failed = 0
+
+    def check(name, condition, detail=""):
+        nonlocal tests_passed, tests_failed
+        if condition:
+            tests_passed += 1
+            status = "PASS"
+        else:
+            tests_failed += 1
+            status = "FAIL"
+        suffix = f" — {detail}" if detail else ""
+        print(f"  [{status}] {name}{suffix}")
+
+    # --- Extremized aggregation with high consensus ---
+    high_consensus = [
+        AgentOpinion(agent_name="A", probability=0.95, confidence="high", reasoning=""),
+        AgentOpinion(agent_name="B", probability=0.96, confidence="high", reasoning=""),
+        AgentOpinion(agent_name="C", probability=0.94, confidence="high", reasoning=""),
+    ]
+    result = extremized_aggregate(high_consensus, extremization_factor=2.5)
+    check("extremized d=2.5 high consensus → valid probability",
+          0.0 < result <= 1.0, f"result={result:.6f}")
+    check("extremized d=2.5 high consensus → more extreme than input",
+          result > 0.95, f"result={result:.6f}")
+
+    # --- Extremized with near-boundary probabilities ---
+    extreme_opinions = [
+        AgentOpinion(agent_name="A", probability=0.99, confidence="high", reasoning=""),
+        AgentOpinion(agent_name="B", probability=0.98, confidence="high", reasoning=""),
+        AgentOpinion(agent_name="C", probability=0.97, confidence="high", reasoning=""),
+    ]
+    result2 = extremized_aggregate(extreme_opinions, extremization_factor=2.5)
+    check("extremized d=2.5 near-boundary → still valid",
+          0.01 <= result2 <= 0.99, f"result={result2:.6f}")
+
+    # --- Kelly with extreme probability values ---
+    k_extreme = kelly_fraction(0.99, 0.01, "YES")
+    check("kelly: p=0.99 c=0.01 → capped at 0.60",
+          k_extreme <= 0.60, f"kelly={k_extreme:.4f}")
+
+    k_tiny = kelly_fraction(0.01, 0.99, "NO")
+    check("kelly: p=0.01 c=0.99 → capped at 0.60",
+          k_tiny <= 0.60, f"kelly={k_tiny:.4f}")
+
+    # --- Config validation ---
+    from polymarket_orchestrator.config import settings
+    check("config: alert_threshold in [0,1]",
+          0 <= settings.alert_threshold <= 1, f"{settings.alert_threshold}")
+    check("config: bankroll >= 0",
+          settings.bankroll >= 0, f"{settings.bankroll}")
+    check("config: whale_leaderboard_count >= 1",
+          settings.whale_leaderboard_count >= 1, f"{settings.whale_leaderboard_count}")
+
+    print(f"\n  {'─' * 60}")
+    print(f"  Results: {tests_passed} passed, {tests_failed} failed")
+    if tests_failed == 0:
+        print("  All robustness tests passed.")
     print(f"  {'─' * 60}")
 
 
@@ -1098,3 +1215,4 @@ if __name__ == "__main__":
     run_edge_case_tests()
     run_news_tests()
     run_whale_tests()
+    run_robustness_tests()

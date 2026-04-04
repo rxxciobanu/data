@@ -33,11 +33,12 @@ def main() -> None:
         help="Bankroll in USD for position sizing (overrides BANKROLL env var). "
              "Omit or set to 0 to disable sizing.",
     )
-    parser.add_argument(
+    whale_group = parser.add_mutually_exclusive_group()
+    whale_group.add_argument(
         "--whale", action="store_true", default=None,
         help="Enable whale wallet tracking (overrides WHALE_ENABLED env var)",
     )
-    parser.add_argument(
+    whale_group.add_argument(
         "--no-whale", action="store_true", default=None,
         help="Disable whale wallet tracking",
     )

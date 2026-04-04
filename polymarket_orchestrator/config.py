@@ -52,4 +52,18 @@ class Settings(BaseSettings):
     whale_min_trade_size: float = float(os.getenv("WHALE_MIN_TRADE_SIZE", "1000"))
 
 
-settings = Settings()
+def _validated_settings() -> Settings:
+    s = Settings()
+    s.bankroll = max(0.0, s.bankroll)
+    s.alert_threshold = max(0.0, min(1.0, s.alert_threshold))
+    s.kelly_fraction = max(0.01, min(1.0, s.kelly_fraction))
+    s.max_bet_pct = max(0.01, min(1.0, s.max_bet_pct))
+    s.max_total_exposure = max(0.01, min(1.0, s.max_total_exposure))
+    s.min_bet_size = max(0.0, s.min_bet_size)
+    s.whale_leaderboard_count = max(1, s.whale_leaderboard_count)
+    s.whale_min_trade_size = max(0.0, s.whale_min_trade_size)
+    s.news_max_articles = max(1, s.news_max_articles)
+    return s
+
+
+settings = _validated_settings()

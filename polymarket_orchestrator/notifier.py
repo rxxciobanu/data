@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html as html_mod
 import logging
 import smtplib
 from email.mime.multipart import MIMEMultipart
@@ -10,6 +11,8 @@ from polymarket_orchestrator.models import BettingAlert
 
 logger = logging.getLogger(__name__)
 
+_esc = html_mod.escape  # Shorthand for HTML escaping user-controlled data
+
 
 def _format_sizing_rows(alert: BettingAlert) -> str:
     """Build HTML table rows for position sizing (empty string if no sizing)."""
@@ -17,7 +20,7 @@ def _format_sizing_rows(alert: BettingAlert) -> str:
     if s is None or s.bet_amount <= 0:
         return ""
 
-    cap_note = f' <span style="color:#9ca3af;font-size:12px;">(risk-limited: {s.cap_reason})</span>' if s.capped else ""
+    cap_note = f' <span style="color:#9ca3af;font-size:12px;">(risk-limited: {_esc(s.cap_reason)})</span>' if s.capped else ""
     return f"""\
         <tr>
           <td style="padding:4px 8px;color:#6b7280;">Bet Size</td>
@@ -47,6 +50,9 @@ def _format_whale_signals_html(signals: list) -> str:
     rows = []
     for ws in signals:
         t = ws.trade
+        label = _esc(t.wallet_label[:30])
+        outcome = _esc(t.outcome)
+        side = _esc(t.side)
         # Overall stats
         stats_note = ""
         if ws.wallet_stats:
@@ -55,7 +61,7 @@ def _format_whale_signals_html(signals: list) -> str:
         # Expert theme badge
         expert_badge = ""
         if ws.is_expert_trade and ws.matching_themes:
-            theme_names = ", ".join(ws.matching_themes)
+            theme_names = _esc(", ".join(ws.matching_themes))
             # Find the best matching theme stats
             best_te = None
             if ws.wallet_stats:
@@ -68,7 +74,7 @@ def _format_whale_signals_html(signals: list) -> str:
                     f'<div style="display:inline-block;background:#dcfce7;color:#166534;'
                     f'padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold;'
                     f'margin-left:4px;">'
-                    f'EXPERT: {best_te.theme} ({best_te.win_rate:.0%} win, '
+                    f'EXPERT: {_esc(best_te.theme)} ({best_te.win_rate:.0%} win, '
                     f'{best_te.total_trades} trades, ${best_te.total_pnl:,.0f})'
                     f'</div>'
                 )
@@ -81,8 +87,8 @@ def _format_whale_signals_html(signals: list) -> str:
 
         rows.append(
             f'<div style="padding:4px 8px;font-size:13px;color:#7c3aed;">'
-            f'&#128011; <strong>{t.wallet_label}</strong> {t.side} '
-            f'${t.usdc_size:,.0f} {t.outcome} at {t.price:.2f}'
+            f'&#128011; <strong>{label}</strong> {side} '
+            f'${t.usdc_size:,.0f} {outcome} at {t.price:.2f}'
             f'{stats_note}{expert_badge}'
             f'</div>'
         )
@@ -102,9 +108,11 @@ def _format_alert_html(alert: BettingAlert) -> str:
     color = "#16a34a" if alert.divergence > 0 else "#dc2626"
     sizing_rows = _format_sizing_rows(alert)
     whale_block = _format_whale_signals_html(alert.whale_signals)
+    question = _esc(alert.market.question)
+    reasoning = _esc(alert.reasoning)
     return f"""\
     <div style="border:1px solid #e5e7eb;border-radius:8px;padding:16px;margin-bottom:16px;">
-      <h3 style="margin:0 0 8px 0;color:#111827;">{alert.market.question}</h3>
+      <h3 style="margin:0 0 8px 0;color:#111827;">{question}</h3>
       <table style="width:100%;border-collapse:collapse;font-size:14px;">
         <tr>
           <td style="padding:4px 8px;color:#6b7280;">Polymarket Price</td>
@@ -132,7 +140,7 @@ def _format_alert_html(alert: BettingAlert) -> str:
       <details style="margin-top:12px;">
         <summary style="cursor:pointer;color:#4b5563;font-size:13px;">AI Reasoning</summary>
         <p style="margin:8px 0 0 0;font-size:13px;color:#374151;line-height:1.5;">
-          {alert.reasoning}
+          {reasoning}
         </p>
       </details>
     </div>"""
@@ -154,6 +162,10 @@ def _format_whale_only_html(whale_report) -> str:
     rows = []
     for wa in whale_only:
         t = wa.trade
+        label = _esc(t.wallet_label[:30])
+        outcome = _esc(t.outcome)
+        side = _esc(t.side)
+        mq = _esc(t.market_question[:60])
         stats_note = ""
         if wa.wallet_stats:
             stats_note = f' | Win rate: {wa.wallet_stats.win_rate:.0%}'
@@ -162,14 +174,14 @@ def _format_whale_only_html(whale_report) -> str:
             expert_mark = (
                 f' <span style="background:#dcfce7;color:#166534;padding:1px 6px;'
                 f'border-radius:3px;font-size:10px;font-weight:bold;">'
-                f'EXPERT: {", ".join(wa.matching_themes)}</span>'
+                f'EXPERT: {_esc(", ".join(wa.matching_themes))}</span>'
             )
         rows.append(
             f'<tr>'
-            f'<td style="padding:6px 8px;font-size:13px;">{t.wallet_label}{stats_note}{expert_mark}</td>'
-            f'<td style="padding:6px 8px;font-size:13px;font-weight:bold;">{t.side} {t.outcome}</td>'
+            f'<td style="padding:6px 8px;font-size:13px;">{label}{stats_note}{expert_mark}</td>'
+            f'<td style="padding:6px 8px;font-size:13px;font-weight:bold;">{side} {outcome}</td>'
             f'<td style="padding:6px 8px;font-size:13px;">${t.usdc_size:,.0f} @ {t.price:.2f}</td>'
-            f'<td style="padding:6px 8px;font-size:13px;color:#6b7280;">{t.market_question[:60]}...</td>'
+            f'<td style="padding:6px 8px;font-size:13px;color:#6b7280;">{mq}...</td>'
             f'</tr>'
         )
 
@@ -201,10 +213,10 @@ def _format_wallet_stats_html(whale_report) -> str:
     rows = []
     for ws in sorted(whale_report.wallet_stats, key=lambda s: s.total_pnl, reverse=True)[:10]:
         pnl_color = "#16a34a" if ws.total_pnl >= 0 else "#dc2626"
-        themes_str = ", ".join(ws.strong_themes) if ws.strong_themes else "-"
+        themes_str = _esc(", ".join(ws.strong_themes)) if ws.strong_themes else "-"
         rows.append(
             f'<tr>'
-            f'<td style="padding:4px 8px;font-size:12px;">{ws.label}</td>'
+            f'<td style="padding:4px 8px;font-size:12px;">{_esc(ws.label[:30])}</td>'
             f'<td style="padding:4px 8px;font-size:12px;">${ws.portfolio_value:,.0f}</td>'
             f'<td style="padding:4px 8px;font-size:12px;">{ws.win_rate:.0%}</td>'
             f'<td style="padding:4px 8px;font-size:12px;color:{pnl_color};font-weight:bold;">'

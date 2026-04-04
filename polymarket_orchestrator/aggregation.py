@@ -35,9 +35,12 @@ Each method returns a probability clamped to [0.01, 0.99].
 """
 from __future__ import annotations
 
+import logging
 import math
 
 from polymarket_orchestrator.models import AgentOpinion
+
+logger = logging.getLogger(__name__)
 
 # Confidence label → numeric weight
 CONFIDENCE_WEIGHTS: dict[str, float] = {
@@ -68,8 +71,10 @@ def _to_logodds(p: float) -> float:
 
 def _from_logodds(lo: float) -> float:
     """Convert log-odds back to probability: 1 / (1 + exp(-lo))."""
-    # Clamp the log-odds to avoid overflow in exp()
-    lo = max(-10.0, min(10.0, lo))
+    # Clamp log-odds to avoid overflow in exp(). Widened to +-40 so
+    # extremized high-consensus forecasts (e.g. d=2.5, agents at 0.99)
+    # don't lose precision. sigmoid(40) ≈ 1 - 4e-18, safe for float64.
+    lo = max(-40.0, min(40.0, lo))
     return _clamp(1.0 / (1.0 + math.exp(-lo)))
 
 
@@ -211,6 +216,15 @@ def aggregate_opinions(
     """
     if not opinions:
         return 0.5, "No opinions to aggregate."
+
+    # Warn if all agents returned identical probabilities (potential shared bias)
+    probs = [op.probability for op in opinions]
+    if len(set(probs)) == 1 and len(probs) > 1:
+        logger.warning(
+            "All %d agents returned identical probability %.2f. "
+            "This may indicate shared bias or a prompt engineering failure.",
+            len(probs), probs[0],
+        )
 
     # Compute all three for the explanation
     p_weighted = weighted_average(opinions)
